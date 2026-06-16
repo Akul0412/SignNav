@@ -1,0 +1,33 @@
+# cd SignNav
+# python3 -m pip install ultralytics opencv-python
+# ./signnav_scripts/convert/run_detection
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One-time dependency install, if your environment does not already have them:
+#   python3 -m pip install ultralytics opencv-python
+#
+# The first run may download yolov8n.pt if it is not already cached locally.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTRACTED_ROOT="${SCRIPT_DIR}/../datasets/extracted"
+DETECTION_ROOT="${SCRIPT_DIR}/../datasets/detection"
+
+python3 "${SCRIPT_DIR}/detect_sign_crops.py" \
+  --extracted-root "${EXTRACTED_ROOT}" \
+  --detection-root "${DETECTION_ROOT}" \
+  --model yolov8n.pt \
+  --classes auto \
+  --conf 0.15 \
+  --iou 0.70 \
+  --imgsz 1280 \
+  --batch 8 \
+  --margin 0.10 \
+  --fallback full-frame
+
+python3 "${SCRIPT_DIR}/select_best_detection.py" \
+  --detection-root "${DETECTION_ROOT}" \
+  --best-dir-name best \
+  --output-basename best \
+  --min-confidence 0.15
