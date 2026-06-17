@@ -13,20 +13,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTRACTED_ROOT="${SCRIPT_DIR}/../datasets/extracted"
 DETECTION_ROOT="${SCRIPT_DIR}/../datasets/detection"
+MODEL_PATH="${SCRIPT_DIR}/../datasets/models/yolov8n.pt"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PYTHON="${SIGNNAV_PYTHON:-python3}"
+SIGNNAV_DEVICE="${SIGNNAV_DEVICE:-cpu}"
+SIGNNAV_IMGSZ="${SIGNNAV_IMGSZ:-1280}"
+SIGNNAV_BATCH="${SIGNNAV_BATCH:-1}"
 
-python3 "${SCRIPT_DIR}/detect_sign_crops.py" \
+if [[ -x "${REPO_ROOT}/.venv-signnav/bin/python" ]]; then
+  PYTHON="${REPO_ROOT}/.venv-signnav/bin/python"
+fi
+
+export YOLO_CONFIG_DIR="${SCRIPT_DIR}/../datasets/.ultralytics"
+export MPLCONFIGDIR="${SCRIPT_DIR}/../datasets/.matplotlib"
+mkdir -p "${YOLO_CONFIG_DIR}" "${MPLCONFIGDIR}" "$(dirname "${MODEL_PATH}")"
+
+"${PYTHON}" "${SCRIPT_DIR}/detect_sign_crops.py" \
   --extracted-root "${EXTRACTED_ROOT}" \
   --detection-root "${DETECTION_ROOT}" \
-  --model yolov8n.pt \
+  --model "${MODEL_PATH}" \
   --classes auto \
   --conf 0.15 \
   --iou 0.70 \
-  --imgsz 1280 \
-  --batch 8 \
+  --imgsz "${SIGNNAV_IMGSZ}" \
+  --batch "${SIGNNAV_BATCH}" \
+  --device "${SIGNNAV_DEVICE}" \
   --margin 0.10 \
-  --fallback full-frame
+  --fallback heuristic
 
-python3 "${SCRIPT_DIR}/select_best_detection.py" \
+"${PYTHON}" "${SCRIPT_DIR}/select_best_detection.py" \
   --detection-root "${DETECTION_ROOT}" \
   --best-dir-name best \
   --output-basename best \

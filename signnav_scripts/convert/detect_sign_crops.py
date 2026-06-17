@@ -11,15 +11,16 @@ Output layout:
     signnav_scripts/datasets/detection/<bag_name>/detect_manifest.json
 
 The script produces at most one crop per source frame, with the same filename as
-the source frame. By default, if YOLO finds no sign-like object in a frame, the
-full frame is copied as the crop so downstream steps keep a one-to-one mapping.
-Rows with no actual detection are marked detected=false in detections.csv.
+the source frame. By default, if YOLO finds no sign-like object in a frame, a
+deterministic high-contrast panel heuristic tries to crop a likely indoor sign.
+Rows with no actual YOLO detection are marked detected=false in detections.csv.
 """
 
 import argparse
 import csv
 import hashlib
 import json
+import math
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -249,6 +250,112 @@ def choose_detection(
     return max(candidates, key=lambda item: item["score"])
 
 
+def choose_heuristic_sign(cv2_module: object, image: object) -> Optional[Dict[str, object]]:
+    """Find a likely sign panel when YOLO has no matching sign-like class."""
+    image_height, image_width = image.shape[:2]
+    scale = min(1.0, 960.0 / max(image_width, image_height))
+    if scale < 1.0:
+        small = cv2_module.resize(
+            image,
+            (int(image_width * scale), int(image_height * scale)),
+            interpolation=cv2_module.INTER_AREA,
+        )
+    else:
+        small = image
+
+    small_height, small_width = small.shape[:2]
+    gray = cv2_module.cvtColor(small, cv2_module.COLOR_BGR2GRAY)
+    blur = cv2_module.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2_module.Canny(blur, 50, 150)
+
+    edge_kernel = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (9, 9))
+    edge_mask = cv2_module.morphologyEx(edges, cv2_module.MORPH_CLOSE, edge_kernel, iterations=2)
+
+    _, dark_mask = cv2_module.threshold(blur, 82, 255, cv2_module.THRESH_BINARY_INV)
+    dark_kernel = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (7, 7))
+    dark_mask = cv2_module.morphologyEx(dark_mask, cv2_module.MORPH_OPEN, dark_kernel, iterations=1)
+    dark_mask = cv2_module.morphologyEx(dark_mask, cv2_module.MORPH_CLOSE, dark_kernel, iterations=2)
+
+    candidates = []
+
+    def add_candidates(mask: object, source: str) -> None:
+        found = cv2_module.findContours(mask, cv2_module.RETR_EXTERNAL, cv2_module.CHAIN_APPROX_SIMPLE)
+        contours = found[0] if len(found) == 2 else found[1]
+        image_area = max(1, small_width * small_height)
+
+        for contour in contours:
+            x, y, w, h = cv2_module.boundingRect(contour)
+            if w < 24 or h < 24:
+                continue
+
+            area = w * h
+            area_ratio = area / image_area
+            if area_ratio < 0.003 or area_ratio > 0.45:
+                continue
+
+            aspect = w / max(1, h)
+            if aspect < 0.18 or aspect > 6.0:
+                continue
+
+            crop_gray = gray[y : y + h, x : x + w]
+            crop_edges = edges[y : y + h, x : x + w]
+            if crop_gray.size == 0:
+                continue
+
+            edge_density = float(cv2_module.countNonZero(crop_edges)) / max(1, area)
+            contrast = float(crop_gray.std())
+            if edge_density < 0.008 and contrast < 20.0:
+                continue
+
+            contour_area = float(cv2_module.contourArea(contour))
+            rectangularity = min(contour_area / max(1.0, float(area)), 1.0)
+            area_small_ok = min(math.sqrt(area_ratio / 0.04), 1.0)
+            area_large_ok = min(math.sqrt(0.32 / max(area_ratio, 0.001)), 1.0)
+            area_score = area_small_ok * area_large_ok
+            edge_score = min(edge_density / 0.10, 1.0)
+            contrast_score = min(contrast / 72.0, 1.0)
+
+            if 0.35 <= aspect <= 4.5:
+                aspect_score = 1.0
+            else:
+                aspect_score = max(0.0, 1.0 - abs(math.log(max(aspect, 0.01))) / 2.5)
+
+            center_y = (y + h / 2.0) / max(1, small_height)
+            upper_score = 1.0 if center_y <= 0.68 else max(0.0, 1.0 - (center_y - 0.68) / 0.32)
+            source_bonus = 0.08 if source == "dark-panel" else 0.0
+            score = (
+                0.32 * edge_score
+                + 0.25 * contrast_score
+                + 0.20 * area_score
+                + 0.10 * rectangularity
+                + 0.05 * aspect_score
+                + 0.08 * upper_score
+                + source_bonus
+            )
+
+            inv_scale = 1.0 / scale
+            candidates.append(
+                {
+                    "bbox": (
+                        x * inv_scale,
+                        y * inv_scale,
+                        (x + w) * inv_scale,
+                        (y + h) * inv_scale,
+                    ),
+                    "score": min(score, 1.0),
+                    "source": source,
+                    "box_area_ratio": (w * h) / max(1, small_width * small_height),
+                }
+            )
+
+    add_candidates(edge_mask, "edge-panel")
+    add_candidates(dark_mask, "dark-panel")
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item["score"])
+
+
 def load_existing_rows(csv_path: Path) -> List[Dict[str, str]]:
     if not csv_path.exists():
         return []
@@ -341,6 +448,7 @@ def write_rows(csv_path: Path, rows: Iterable[Dict[str, object]]) -> None:
         "crop_width",
         "crop_height",
         "box_area_ratio",
+        "detection_source",
         "error",
     ]
     with open(csv_path, "w", newline="") as f:
@@ -384,7 +492,6 @@ def process_bag(
     output_bag_dir.mkdir(parents=True, exist_ok=True)
     clean_previous_outputs(output_frames_dir, detections_csv, manifest_path)
 
-    frame_by_resolved = {p.resolve(): p for p in frames}
     predict_kwargs = {
         "source": [str(p.resolve()) for p in frames],
         "stream": True,
@@ -401,9 +508,10 @@ def process_bag(
     crop_count = 0
     detection_count = 0
 
-    for result in model.predict(**predict_kwargs):
-        result_path = Path(getattr(result, "path", "")).resolve()
-        frame_path = frame_by_resolved.get(result_path, result_path)
+    for result_index, result in enumerate(model.predict(**predict_kwargs)):
+        if result_index >= len(frames):
+            break
+        frame_path = frames[result_index]
         frame_filename = frame_path.name
 
         row: Dict[str, object] = {
@@ -427,6 +535,7 @@ def process_bag(
             "crop_width": "",
             "crop_height": "",
             "box_area_ratio": "0.000000",
+            "detection_source": "",
             "error": "",
         }
 
@@ -441,11 +550,16 @@ def process_bag(
         row["image_height"] = image_height
 
         selected = choose_detection(result, names, allowed_classes, image_width, image_height)
-        if selected is None and args.fallback == "skip":
+        detection_source = "yolo" if selected is not None else ""
+        heuristic = None
+        if selected is None and args.fallback == "heuristic":
+            heuristic = choose_heuristic_sign(cv2_module, image)
+
+        if selected is None and heuristic is None and args.fallback == "skip":
             rows.append(row)
             continue
 
-        if selected is None:
+        if selected is None and heuristic is None:
             crop_box = (0, 0, image_width, image_height)
             bbox = ("", "", "", "")
             class_id = ""
@@ -453,6 +567,16 @@ def process_bag(
             confidence = 0.0
             selected_score = 0.0
             box_area_ratio = 0.0
+            detection_source = "full-frame"
+        elif selected is None:
+            bbox = heuristic["bbox"]
+            crop_box = expand_bbox(bbox, image_width, image_height, args.margin)
+            class_id = -1
+            class_name = f"heuristic_{heuristic['source']}"
+            confidence = float(heuristic["score"])
+            selected_score = float(heuristic["score"])
+            box_area_ratio = float(heuristic["box_area_ratio"])
+            detection_source = "heuristic"
         else:
             bbox = selected["bbox"]
             crop_box = expand_bbox(bbox, image_width, image_height, args.margin)
@@ -493,6 +617,7 @@ def process_bag(
                 "crop_width": crop_x2 - crop_x1,
                 "crop_height": crop_y2 - crop_y1,
                 "box_area_ratio": f"{box_area_ratio:.6f}",
+                "detection_source": detection_source,
             }
         )
         rows.append(row)
@@ -550,9 +675,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--margin", type=float, default=0.10, help="Crop expansion in every direction.")
     ap.add_argument(
         "--fallback",
-        choices=("full-frame", "skip"),
-        default="full-frame",
-        help="What to do when no sign-like object is detected in a frame.",
+        choices=("heuristic", "full-frame", "skip"),
+        default="heuristic",
+        help="What to do when YOLO finds no sign-like object in a frame.",
     )
     ap.add_argument("--force", action="store_true", help="Rerun even when manifests say outputs are current.")
     return ap
