@@ -17,7 +17,7 @@ MODEL_PATH="${SCRIPT_DIR}/../datasets/models/yolov8n.pt"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON="${SIGNNAV_PYTHON:-python3}"
 SIGNNAV_DEVICE="${SIGNNAV_DEVICE:-cpu}"
-SIGNNAV_IMGSZ="${SIGNNAV_IMGSZ:-1280}"
+SIGNNAV_IMGSZ="${SIGNNAV_IMGSZ:-640}"
 SIGNNAV_BATCH="${SIGNNAV_BATCH:-1}"
 
 if [[ -x "${REPO_ROOT}/.venv-signnav/bin/python" ]]; then
@@ -46,3 +46,7 @@ mkdir -p "${YOLO_CONFIG_DIR}" "${MPLCONFIGDIR}" "$(dirname "${MODEL_PATH}")"
   --best-dir-name best \
   --output-basename best \
   --min-confidence 0.15
+
+"${PYTHON}" "${SCRIPT_DIR}/collect_best_crops.py" \
+  --detection-root "${DETECTION_ROOT}" \
+  --output-root "${SCRIPT_DIR}/../datasets/best_crops_by_bag"

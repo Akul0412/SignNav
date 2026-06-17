@@ -251,7 +251,7 @@ def choose_detection(
 
 
 def choose_heuristic_sign(cv2_module: object, image: object) -> Optional[Dict[str, object]]:
-    """Find a likely sign panel when YOLO has no matching sign-like class."""
+    """Find a likely indoor wayfinding sign when YOLO has no matching class."""
     image_height, image_width = image.shape[:2]
     scale = min(1.0, 960.0 / max(image_width, image_height))
     if scale < 1.0:
@@ -267,93 +267,191 @@ def choose_heuristic_sign(cv2_module: object, image: object) -> Optional[Dict[st
     gray = cv2_module.cvtColor(small, cv2_module.COLOR_BGR2GRAY)
     blur = cv2_module.GaussianBlur(gray, (3, 3), 0)
     edges = cv2_module.Canny(blur, 50, 150)
+    image_area = max(1, small_width * small_height)
 
-    edge_kernel = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (9, 9))
-    edge_mask = cv2_module.morphologyEx(edges, cv2_module.MORPH_CLOSE, edge_kernel, iterations=2)
-
-    _, dark_mask = cv2_module.threshold(blur, 82, 255, cv2_module.THRESH_BINARY_INV)
-    dark_kernel = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (7, 7))
-    dark_mask = cv2_module.morphologyEx(dark_mask, cv2_module.MORPH_OPEN, dark_kernel, iterations=1)
-    dark_mask = cv2_module.morphologyEx(dark_mask, cv2_module.MORPH_CLOSE, dark_kernel, iterations=2)
-
-    candidates = []
-
-    def add_candidates(mask: object, source: str) -> None:
+    def contour_boxes(mask: object) -> List[Tuple[int, int, int, int, float]]:
         found = cv2_module.findContours(mask, cv2_module.RETR_EXTERNAL, cv2_module.CHAIN_APPROX_SIMPLE)
         contours = found[0] if len(found) == 2 else found[1]
-        image_area = max(1, small_width * small_height)
-
+        boxes = []
         for contour in contours:
             x, y, w, h = cv2_module.boundingRect(contour)
-            if w < 24 or h < 24:
-                continue
+            boxes.append((x, y, w, h, float(cv2_module.contourArea(contour))))
+        return boxes
 
-            area = w * h
-            area_ratio = area / image_area
-            if area_ratio < 0.003 or area_ratio > 0.45:
-                continue
+    def component_boxes(mask: object) -> List[Tuple[int, int, int, int, float]]:
+        labels, _, stats, _ = cv2_module.connectedComponentsWithStats(mask, 8)
+        boxes = []
+        for label_id in range(1, labels):
+            x, y, w, h, area = stats[label_id]
+            boxes.append((int(x), int(y), int(w), int(h), float(area)))
+        return boxes
 
-            aspect = w / max(1, h)
-            if aspect < 0.18 or aspect > 6.0:
-                continue
+    def area_preference(area_ratio: float) -> float:
+        # Useful signs in these bags are usually 1-18% of the image. This still
+        # allows distant signs, but avoids tiny labels and whole-frame hallway crops.
+        small_ok = min(math.sqrt(area_ratio / 0.035), 1.0)
+        large_ok = min(math.sqrt(0.18 / max(area_ratio, 0.001)), 1.0)
+        return small_ok * large_ok
 
-            crop_gray = gray[y : y + h, x : x + w]
-            crop_edges = edges[y : y + h, x : x + w]
-            if crop_gray.size == 0:
-                continue
+    def aspect_preference(aspect: float) -> float:
+        if 0.28 <= aspect <= 0.95:
+            return 1.0
+        if 0.95 < aspect <= 3.2:
+            return 0.82
+        return max(0.0, 1.0 - abs(math.log(max(aspect, 0.01))) / 1.8)
 
-            edge_density = float(cv2_module.countNonZero(crop_edges)) / max(1, area)
-            contrast = float(crop_gray.std())
-            if edge_density < 0.008 and contrast < 20.0:
-                continue
+    def border_preference(x: int, y: int, w: int, h: int) -> float:
+        return max(0.35, 1.0 - 0.22 * border_touch_count(x, y, w, h))
 
-            contour_area = float(cv2_module.contourArea(contour))
-            rectangularity = min(contour_area / max(1.0, float(area)), 1.0)
-            area_small_ok = min(math.sqrt(area_ratio / 0.04), 1.0)
-            area_large_ok = min(math.sqrt(0.32 / max(area_ratio, 0.001)), 1.0)
-            area_score = area_small_ok * area_large_ok
-            edge_score = min(edge_density / 0.10, 1.0)
-            contrast_score = min(contrast / 72.0, 1.0)
+    def border_touch_count(x: int, y: int, w: int, h: int) -> int:
+        touches = 0
+        touches += int(x <= 2)
+        touches += int(y <= 2)
+        touches += int(x + w >= small_width - 2)
+        touches += int(y + h >= small_height - 2)
+        return touches
 
-            if 0.35 <= aspect <= 4.5:
-                aspect_score = 1.0
-            else:
-                aspect_score = max(0.0, 1.0 - abs(math.log(max(aspect, 0.01))) / 2.5)
+    def position_preference(y: int, h: int) -> float:
+        center_y = (y + h / 2.0) / max(1, small_height)
+        if 0.08 <= center_y <= 0.74:
+            return 1.0
+        if center_y < 0.08:
+            return max(0.0, center_y / 0.08)
+        return max(0.0, 1.0 - (center_y - 0.74) / 0.26)
 
-            center_y = (y + h / 2.0) / max(1, small_height)
-            upper_score = 1.0 if center_y <= 0.68 else max(0.0, 1.0 - (center_y - 0.68) / 0.32)
-            source_bonus = 0.08 if source == "dark-panel" else 0.0
+    def candidate_from_box(
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        contour_area: float,
+        source: str,
+        dark_mask_roi_source: Optional[object] = None,
+    ) -> Optional[Dict[str, object]]:
+        if w < 32 or h < 32:
+            return None
+
+        area = w * h
+        area_ratio = area / image_area
+        if area_ratio < 0.0025 or area_ratio > 0.42:
+            return None
+
+        aspect = w / max(1, h)
+        if aspect < 0.12 or aspect > 5.8:
+            return None
+
+        crop_gray = gray[y : y + h, x : x + w]
+        crop_edges = edges[y : y + h, x : x + w]
+        if crop_gray.size == 0:
+            return None
+
+        contrast = float(crop_gray.std())
+        mean_brightness = float(crop_gray.mean())
+        edge_density = float(cv2_module.countNonZero(crop_edges)) / max(1, area)
+        if contrast < 16.0 and edge_density < 0.012:
+            return None
+
+        if dark_mask_roi_source is None:
+            dark_fraction = float((crop_gray < 105).sum()) / max(1, area)
+        else:
+            dark_roi = dark_mask_roi_source[y : y + h, x : x + w]
+            dark_fraction = float(cv2_module.countNonZero(dark_roi)) / max(1, area)
+
+        # White text/icons on black panels create a lot of thin edges inside the
+        # dark region. Rails and door frames create long edges but little dark area.
+        text_edge_score = min(edge_density / 0.075, 1.0)
+        contrast_score = min(contrast / 68.0, 1.0)
+        dark_score = min(dark_fraction / 0.62, 1.0)
+        darkness_score = max(0.0, min((108.0 - mean_brightness) / 72.0, 1.0))
+        rectangularity = min(contour_area / max(1.0, float(area)), 1.0)
+        area_score = area_preference(area_ratio)
+        aspect_score = aspect_preference(aspect)
+        border_score = border_preference(x, y, w, h)
+        border_touches = border_touch_count(x, y, w, h)
+        position_score = position_preference(y, h)
+
+        if source == "dark-panel":
+            if dark_fraction < 0.52:
+                return None
+            if mean_brightness > 92.0 and dark_fraction < 0.72:
+                return None
             score = (
-                0.32 * edge_score
-                + 0.25 * contrast_score
-                + 0.20 * area_score
-                + 0.10 * rectangularity
-                + 0.05 * aspect_score
-                + 0.08 * upper_score
-                + source_bonus
+                0.31 * dark_score
+                + 0.15 * darkness_score
+                + 0.17 * text_edge_score
+                + 0.13 * contrast_score
+                + 0.11 * area_score
+                + 0.06 * rectangularity
+                + 0.04 * aspect_score
+                + 0.02 * border_score
+                + 0.01 * position_score
+            )
+            if border_touches >= 2 and area_ratio > 0.08:
+                score *= 0.38
+            elif border_touches >= 1 and area_ratio > 0.16:
+                score *= 0.62
+        else:
+            if edge_density < 0.018 or area_ratio > 0.22:
+                return None
+            score = (
+                0.30 * text_edge_score
+                + 0.22 * contrast_score
+                + 0.18 * area_score
+                + 0.11 * aspect_score
+                + 0.09 * rectangularity
+                + 0.06 * border_score
+                + 0.04 * position_score
             )
 
-            inv_scale = 1.0 / scale
-            candidates.append(
-                {
-                    "bbox": (
-                        x * inv_scale,
-                        y * inv_scale,
-                        (x + w) * inv_scale,
-                        (y + h) * inv_scale,
-                    ),
-                    "score": min(score, 1.0),
-                    "source": source,
-                    "box_area_ratio": (w * h) / max(1, small_width * small_height),
-                }
-            )
+        inv_scale = 1.0 / scale
+        return {
+            "bbox": (
+                x * inv_scale,
+                y * inv_scale,
+                (x + w) * inv_scale,
+                (y + h) * inv_scale,
+            ),
+            "score": min(score, 1.0),
+            "source": source,
+            "box_area_ratio": area_ratio,
+        }
 
-    add_candidates(edge_mask, "edge-panel")
-    add_candidates(dark_mask, "dark-panel")
+    # First pass: black/dark wayfinding boards. Use connected components on the
+    # opened mask so interior wall signs are not hidden by a large border/ceiling
+    # contour in the same threshold image.
+    _, dark_mask = cv2_module.threshold(blur, 80, 255, cv2_module.THRESH_BINARY_INV)
+    dark_mask = cv2_module.morphologyEx(
+        dark_mask,
+        cv2_module.MORPH_OPEN,
+        cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
 
-    if not candidates:
+    dark_candidates = []
+    for x, y, w, h, contour_area in component_boxes(dark_mask):
+        candidate = candidate_from_box(x, y, w, h, contour_area, "dark-panel", dark_mask)
+        if candidate is not None:
+            dark_candidates.append(candidate)
+
+    if dark_candidates:
+        return max(dark_candidates, key=lambda item: item["score"])
+
+    # Second pass: non-black signs, such as round directional plaques.
+    edge_mask = cv2_module.morphologyEx(
+        edges,
+        cv2_module.MORPH_CLOSE,
+        cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (11, 11)),
+        iterations=2,
+    )
+    edge_candidates = []
+    for x, y, w, h, contour_area in contour_boxes(edge_mask):
+        candidate = candidate_from_box(x, y, w, h, contour_area, "edge-panel")
+        if candidate is not None:
+            edge_candidates.append(candidate)
+
+    if not edge_candidates:
         return None
-    return max(candidates, key=lambda item: item["score"])
+    return max(edge_candidates, key=lambda item: item["score"])
 
 
 def load_existing_rows(csv_path: Path) -> List[Dict[str, str]]:

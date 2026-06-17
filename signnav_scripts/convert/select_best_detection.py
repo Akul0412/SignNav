@@ -121,6 +121,7 @@ def write_rows(csv_path: Path, rows: Iterable[Dict[str, object]]) -> None:
         "detected",
         "confidence",
         "class_name",
+        "detection_source",
         "crop_width",
         "crop_height",
         "sharpness",
@@ -200,10 +201,36 @@ def crop_quality(cv2_module: object, crop_path: Path) -> Optional[Dict[str, floa
     sharpness = float(cv2_module.Laplacian(gray, cv2_module.CV_64F).var())
     brightness = float(gray.mean())
     contrast = float(gray.std())
+    bright_threshold = max(105, int(brightness + 0.45 * contrast))
+    _, bright = cv2_module.threshold(gray, bright_threshold, 255, cv2_module.THRESH_BINARY)
+    bright = cv2_module.morphologyEx(
+        bright,
+        cv2_module.MORPH_OPEN,
+        cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (2, 2)),
+        iterations=1,
+    )
+    n_labels, _, stats, _ = cv2_module.connectedComponentsWithStats(bright, 8)
+    small_components = 0
+    small_component_area = 0
+    max_component_area = max(80, int(width * height * 0.006))
+    for label_id in range(1, n_labels):
+        _, _, comp_w, comp_h, comp_area = stats[label_id]
+        if (
+            3 <= comp_area <= max_component_area
+            and 2 <= comp_w <= width * 0.6
+            and 2 <= comp_h <= height * 0.35
+        ):
+            small_components += 1
+            small_component_area += int(comp_area)
 
     sharpness_score = min(math.log1p(sharpness) / math.log1p(1500.0), 1.0)
     contrast_score = min(contrast / 70.0, 1.0)
     brightness_score = max(0.0, 1.0 - abs(brightness - 127.5) / 127.5)
+    darkness_score = max(0.0, min((112.0 - brightness) / 72.0, 1.0))
+    component_count_score = min(small_components / 18.0, 1.0)
+    component_density_score = min((small_components / max(1.0, (width * height) / 1_000_000.0)) / 260.0, 1.0)
+    component_area_score = min((small_component_area / max(1.0, width * height)) / 0.035, 1.0)
+    text_score = max(component_count_score, 0.8 * component_density_score, component_area_score)
     clarity_score = 0.65 * sharpness_score + 0.20 * contrast_score + 0.15 * brightness_score
     size_score = min(math.sqrt(width * height) / 900.0, 1.0)
 
@@ -221,6 +248,9 @@ def crop_quality(cv2_module: object, crop_path: Path) -> Optional[Dict[str, floa
         "contrast": contrast,
         "sharpness_score": sharpness_score,
         "clarity_score": clarity_score,
+        "darkness_score": darkness_score,
+        "text_score": text_score,
+        "small_components": float(small_components),
         "size_score": size_score,
         "aspect_score": aspect_score,
     }
@@ -253,11 +283,57 @@ def area_score(row: Dict[str, str]) -> float:
     if crop_width <= 0 or crop_height <= 0 or image_width <= 0 or image_height <= 0:
         return 0.0
     area_ratio = (crop_width * crop_height) / max(1.0, image_width * image_height)
-    return min(math.sqrt(area_ratio / 0.12), 1.0)
+    small_ok = min(math.sqrt(area_ratio / 0.04), 1.0)
+    large_ok = min((0.22 / max(area_ratio, 0.001)) ** 0.75, 1.0)
+    return small_ok * large_ok
+
+
+def crop_shape_score(row: Dict[str, str]) -> float:
+    crop_width = safe_float(row.get("crop_width"), 0.0)
+    crop_height = safe_float(row.get("crop_height"), 0.0)
+    image_width = safe_float(row.get("image_width"), 0.0)
+    image_height = safe_float(row.get("image_height"), 0.0)
+    if crop_width <= 0 or crop_height <= 0 or image_width <= 0 or image_height <= 0:
+        return 0.5
+
+    area_ratio = (crop_width * crop_height) / max(1.0, image_width * image_height)
+    width_ratio = crop_width / image_width
+    height_ratio = crop_height / image_height
+    aspect = max(crop_width / max(1.0, crop_height), crop_height / max(1.0, crop_width))
+
+    score = 1.0
+    if area_ratio > 0.24:
+        score *= max(0.18, 1.0 - (area_ratio - 0.24) / 0.34)
+    if width_ratio > 0.82:
+        score *= 0.58
+    if height_ratio > 0.88:
+        score *= 0.58
+    if aspect > 4.0:
+        score *= max(0.25, 1.0 - (aspect - 4.0) / 3.0)
+
+    crop_x1 = safe_float(row.get("crop_x1"), 0.0)
+    crop_y1 = safe_float(row.get("crop_y1"), 0.0)
+    crop_x2 = safe_float(row.get("crop_x2"), image_width)
+    crop_y2 = safe_float(row.get("crop_y2"), image_height)
+    touches = 0
+    touches += int(crop_x1 <= 1)
+    touches += int(crop_y1 <= 1)
+    touches += int(crop_x2 >= image_width - 1)
+    touches += int(crop_y2 >= image_height - 1)
+    if touches == 1:
+        score *= 0.82
+    elif touches >= 2:
+        score *= 0.48
+
+    return max(0.05, score)
 
 
 def class_usefulness(class_name: str) -> float:
     name = class_name.lower()
+    if "heuristic_dark-panel" in name:
+        return 1.10
+    if "heuristic_edge-panel" in name:
+        return 1.04
     if "stop sign" in name:
         return 1.04
     if "sign" in name:
@@ -271,8 +347,10 @@ def score_candidate(row: Dict[str, str], quality: Dict[str, float]) -> Dict[str,
     detected = str_to_bool(row.get("detected", "false"))
     confidence = safe_float(row.get("confidence"), 0.0)
     confidence_score = min(max(confidence, 0.0), 1.0)
+    detection_source = row.get("detection_source", "")
     row_area_score = area_score(row)
     row_center_score = center_score(row)
+    row_shape_score = crop_shape_score(row)
     usefulness = class_usefulness(row.get("class_name", ""))
 
     if detected:
@@ -285,8 +363,35 @@ def score_candidate(row: Dict[str, str], quality: Dict[str, float]) -> Dict[str,
             + 0.04 * quality["aspect_score"]
         )
         score *= usefulness
+    elif detection_source == "heuristic":
+        score = (
+            0.38 * confidence_score
+            + 0.27 * quality["clarity_score"]
+            + 0.12 * quality["size_score"]
+            + 0.12 * quality["text_score"]
+            + 0.08 * quality["darkness_score"]
+            + 0.08 * row_area_score
+            + 0.06 * row_center_score
+            + 0.03 * quality["aspect_score"]
+        )
+        if row.get("class_name", "") == "heuristic_dark-panel" and quality["brightness"] > 84.0:
+            score *= max(0.45, 1.0 - (quality["brightness"] - 84.0) / 45.0)
+        crop_width = safe_float(row.get("crop_width"), quality["width"])
+        crop_height = safe_float(row.get("crop_height"), quality["height"])
+        horizontal_aspect = crop_width / max(1.0, crop_height)
+        if (
+            row.get("class_name", "") == "heuristic_dark-panel"
+            and horizontal_aspect > 1.45
+            and quality["sharpness_score"] < 0.45
+            and row_area_score > 0.82
+        ):
+            score *= 0.70
+        score *= usefulness * row_shape_score
     else:
-        score = 0.55 * quality["clarity_score"] + 0.25 * quality["size_score"] + 0.20 * row_center_score
+        # Full-frame fallback is only a last resort. Large hallway crops can look
+        # sharp/clear, but they are not useful sign crops.
+        score = 0.28 * quality["clarity_score"] + 0.07 * quality["size_score"] + 0.10 * row_center_score
+        score = min(score, 0.42)
 
     return {
         "score": score,
@@ -295,6 +400,7 @@ def score_candidate(row: Dict[str, str], quality: Dict[str, float]) -> Dict[str,
         "detected": str(detected).lower(),
         "confidence": confidence,
         "class_name": row.get("class_name", ""),
+        "detection_source": detection_source,
         "crop_width": safe_int(row.get("crop_width"), int(quality["width"])),
         "crop_height": safe_int(row.get("crop_height"), int(quality["height"])),
         "sharpness": quality["sharpness"],
@@ -357,9 +463,23 @@ def select_for_bag(
         for row in crop_rows
         if str_to_bool(row.get("detected", "false")) and safe_float(row.get("confidence"), 0.0) >= args.min_confidence
     ]
+    heuristic_rows = [
+        row
+        for row in crop_rows
+        if row.get("detection_source", "") == "heuristic"
+        and safe_float(row.get("confidence"), 0.0) >= args.min_confidence
+    ]
+    dark_panel_rows = [row for row in heuristic_rows if row.get("class_name", "") == "heuristic_dark-panel"]
+    edge_panel_rows = [row for row in heuristic_rows if row.get("class_name", "") == "heuristic_edge-panel"]
     if detected_rows:
         candidate_rows = detected_rows
         candidate_source = "detected"
+    elif dark_panel_rows:
+        candidate_rows = dark_panel_rows
+        candidate_source = "heuristic_dark-panel"
+    elif edge_panel_rows:
+        candidate_rows = edge_panel_rows
+        candidate_source = "heuristic_edge-panel"
     elif args.allow_fallback:
         candidate_rows = crop_rows
         candidate_source = "fallback"
@@ -391,6 +511,7 @@ def select_for_bag(
                 "detected": item["detected"],
                 "confidence": f"{float(item['confidence']):.6f}",
                 "class_name": item["class_name"],
+                "detection_source": item["detection_source"],
                 "crop_width": item["crop_width"],
                 "crop_height": item["crop_height"],
                 "sharpness": f"{float(item['sharpness']):.3f}",
