@@ -90,7 +90,9 @@ class Config:
 
     # model selection / resources (Jetson-friendly defaults)
     reasoner_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
-    reasoner_4bit: bool = True
+    reasoner_4bit: bool = False               # fp16 on Jetson (no bitsandbytes needed)
+    use_yolo: bool = False                     # if False, skip YOLO (no torchvision needed);
+                                              # signs come from the OpenCV dark-panel heuristic
 
     # STUB SWITCHES — flip to True if a model can't load (memory/hardware),
     # so the architecture/loop still runs end-to-end with mocks.

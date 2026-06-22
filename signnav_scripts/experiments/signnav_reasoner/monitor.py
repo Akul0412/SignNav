@@ -41,11 +41,26 @@ class Monitor:
         self.cfg = config
         self._yolo = None
         self._gdino = None
+        self._cv2 = None              # for heuristic-only sign detection
+        self._heuristic_only = not config.use_yolo
         if not config.stub_detector:
             self._load_sign_detector()
             self._load_hazard_detector()
 
     def _load_sign_detector(self):
+        # heuristic-only path: no YOLO, no torchvision needed
+        if self._heuristic_only:
+            try:
+                import cv2
+                self._cv2 = cv2
+                print("[Monitor] sign detection: OpenCV dark-panel HEURISTIC only "
+                      "(YOLO disabled; no torchvision needed)")
+            except Exception as e:
+                print(f"[Monitor] OpenCV unavailable for heuristic ({e}).")
+                if not self.cfg.allow_stub_fallback:
+                    raise RuntimeError(f"heuristic sign detector needs opencv: {e}")
+            return
+        # YOLO path (needs ultralytics + torchvision)
         try:
             from sign_detection import LiveSignDetector
             self._yolo = LiveSignDetector(
@@ -110,6 +125,24 @@ class Monitor:
         return self.detect_all(image, step).chosen
 
     def _detect_signs_raw(self, image) -> List[dict]:
+        # heuristic-only mode: run the OpenCV dark-panel detector directly
+        if self._heuristic_only:
+            if self._cv2 is None:
+                return []
+            import numpy as np
+            from sign_detection import choose_heuristic_sign, expand_bbox
+            arr = np.array(image)[:, :, ::-1]   # PIL RGB -> BGR
+            h, w = arr.shape[:2]
+            hc = choose_heuristic_sign(self._cv2, arr)
+            if hc is None or hc["score"] < 0.30:
+                return []
+            x1, y1, x2, y2 = hc["bbox"]
+            d = {"bbox": (x1, y1, x2, y2), "confidence": float(hc["score"]),
+                 "class_id": -1, "class_name": f"heuristic_{hc['source']}",
+                 "score": float(hc["score"]), "box_area_ratio": hc["box_area_ratio"]}
+            d["crop_box"] = expand_bbox(d["bbox"], w, h, self.cfg.crop_margin)
+            return [d]
+        # YOLO mode
         if self._yolo is None:
             return []
         return self._yolo.detect(image)
