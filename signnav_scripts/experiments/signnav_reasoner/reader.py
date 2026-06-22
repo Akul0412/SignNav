@@ -141,9 +141,46 @@ class Reader:
             from transformers import AutoImageProcessor
             image_processor = AutoImageProcessor.from_pretrained(model, use_fast=False)
 
-        # build the Qwen processor from image processor + tokenizer ONLY (no video)
+        # build the Qwen processor from image processor + tokenizer. The processor
+        # REQUIRES a video_processor of type BaseVideoProcessor (won't accept None),
+        # even though we only process still images. Provide a minimal one to satisfy
+        # the type check; it is never used.
         from transformers import Qwen2_5_VLProcessor
-        return Qwen2_5_VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+        video_processor = self._make_dummy_video_processor()
+        try:
+            return Qwen2_5_VLProcessor(image_processor=image_processor,
+                                       tokenizer=tokenizer,
+                                       video_processor=video_processor)
+        except TypeError:
+            # some versions accept video_processor as positional / different name
+            return Qwen2_5_VLProcessor(image_processor, tokenizer, video_processor)
+
+    def _make_dummy_video_processor(self):
+        """Create a minimal BaseVideoProcessor instance to satisfy the Qwen processor's
+        type check. We never process video, so this is only to pass validation."""
+        # Try to load the real Qwen video processor WITHOUT torchvision first
+        try:
+            from transformers import Qwen2_5_VLVideoProcessor
+            return Qwen2_5_VLVideoProcessor.from_pretrained(self.cfg.reasoner_model)
+        except Exception:
+            pass
+        # Fallback: instantiate a bare BaseVideoProcessor subclass
+        try:
+            from transformers.video_processing_utils import BaseVideoProcessor
+
+            class _DummyVideoProcessor(BaseVideoProcessor):
+                def __init__(self):
+                    try:
+                        super().__init__()
+                    except Exception:
+                        pass
+                def preprocess(self, *a, **k):
+                    raise RuntimeError("video not supported in this build")
+
+            return _DummyVideoProcessor()
+        except Exception as e:
+            print(f"[Reader] could not build dummy video processor ({e})")
+            return None
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
