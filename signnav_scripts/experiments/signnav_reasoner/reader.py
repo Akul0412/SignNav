@@ -89,10 +89,9 @@ class Reader:
                 kw["torch_dtype"] = torch.float16
             self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.cfg.reasoner_model, **kw)
-            # Load the processor WITHOUT the video sub-processor (which hard-requires
-            # torchvision). We process still images only, so build the processor from
-            # the image processor + tokenizer directly.
-            self._processor = self._load_processor_no_video()
+            # transformers 4.x: plain AutoProcessor works and includes the chat template
+            from transformers import AutoProcessor
+            self._processor = AutoProcessor.from_pretrained(self.cfg.reasoner_model)
             print(f"[Reader] {self.cfg.reasoner_model} loaded (4bit={self.cfg.reasoner_4bit})")
         except Exception as e:
             import traceback
@@ -110,77 +109,6 @@ class Reader:
                       "only if you intentionally want the no-model demo.\n")
                 raise RuntimeError(
                     f"Reader VLM failed to load and stub fallback is disabled: {e}")
-
-    def _load_processor_no_video(self):
-        """Build the Qwen2.5-VL processor with the PIL image backend and NO video
-        processor (which requires torchvision). We process still images only.
-        The transformers error messages confirm a PIL image backend exists; we use it."""
-        from transformers import AutoTokenizer
-        model = self.cfg.reasoner_model
-
-        # get a tokenizer (no torchvision needed)
-        tokenizer = AutoTokenizer.from_pretrained(model)
-
-        # get the PIL-backend image processor (avoids torchvision)
-        image_processor = None
-        # Route A: explicit backend="pil" on the image processor
-        try:
-            from transformers import AutoImageProcessor
-            image_processor = AutoImageProcessor.from_pretrained(model, backend="pil")
-        except Exception as eA:
-            print(f"[Reader] image proc route A failed ({eA}); trying B")
-        # Route B: import the PIL image processor class directly by name
-        if image_processor is None:
-            try:
-                from transformers import Qwen2VLImageProcessorPil
-                image_processor = Qwen2VLImageProcessorPil.from_pretrained(model)
-            except Exception as eB:
-                print(f"[Reader] image proc route B failed ({eB}); trying C")
-        # Route C: use_fast=False forces the slow/PIL path
-        if image_processor is None:
-            from transformers import AutoImageProcessor
-            image_processor = AutoImageProcessor.from_pretrained(model, use_fast=False)
-
-        # build the Qwen processor from image processor + tokenizer. The processor
-        # REQUIRES a video_processor of type BaseVideoProcessor (won't accept None),
-        # even though we only process still images. Provide a minimal one to satisfy
-        # the type check; it is never used.
-        from transformers import Qwen2_5_VLProcessor
-        video_processor = self._make_dummy_video_processor()
-        try:
-            return Qwen2_5_VLProcessor(image_processor=image_processor,
-                                       tokenizer=tokenizer,
-                                       video_processor=video_processor)
-        except TypeError:
-            # some versions accept video_processor as positional / different name
-            return Qwen2_5_VLProcessor(image_processor, tokenizer, video_processor)
-
-    def _make_dummy_video_processor(self):
-        """Create a minimal BaseVideoProcessor instance to satisfy the Qwen processor's
-        type check. We never process video, so this is only to pass validation."""
-        # Try to load the real Qwen video processor WITHOUT torchvision first
-        try:
-            from transformers import Qwen2_5_VLVideoProcessor
-            return Qwen2_5_VLVideoProcessor.from_pretrained(self.cfg.reasoner_model)
-        except Exception:
-            pass
-        # Fallback: instantiate a bare BaseVideoProcessor subclass
-        try:
-            from transformers.video_processing_utils import BaseVideoProcessor
-
-            class _DummyVideoProcessor(BaseVideoProcessor):
-                def __init__(self):
-                    try:
-                        super().__init__()
-                    except Exception:
-                        pass
-                def preprocess(self, *a, **k):
-                    raise RuntimeError("video not supported in this build")
-
-            return _DummyVideoProcessor()
-        except Exception as e:
-            print(f"[Reader] could not build dummy video processor ({e})")
-            return None
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
