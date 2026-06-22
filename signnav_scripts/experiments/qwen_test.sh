@@ -27,7 +27,13 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # --- run Test 1 ---
 # EDIT the frame path and box (x y w h) to bracket a real sign in a clear frame.
 # Run with NO --box first to let Qwen find the sign in the whole frame, then tighten.
-python signnav_scripts/experiments/test_teacher_read.py \
-    --frame signnav_scripts/datasets/extracted/rosbag2_keller_22/frames/1781219598310399306.jpg \
-    --goal "classroom 3-120"
+echo "=== start: $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+START_TS=$(date +%s)
+
+python signnav_scripts/experiments/stress_test_teacher.py \
+    --frame signnav_scripts/datasets/extracted/rosbag2_keller_24/frames/image.png
+
+END_TS=$(date +%s)
+echo "=== end: $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+echo "=== elapsed: $((END_TS - START_TS)) seconds ==="
 echo "=== done ==="

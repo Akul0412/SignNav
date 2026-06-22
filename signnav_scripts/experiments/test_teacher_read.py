@@ -30,6 +30,7 @@ Usage:
 import argparse
 import json
 import sys
+import time
 
 import torch
 from PIL import Image
@@ -53,12 +54,16 @@ def goal_prompt(goal):
     return (
         "This is a photo of a navigational/directional sign in a building. "
         f"The robot's goal is to reach: \"{goal}\".\n"
-        "Find the line on the sign that matches this goal (or is closest to it), "
-        "and tell me the DIRECTION of the arrow associated with THAT line: "
+        "Find the line on the sign that best matches this goal BY MEANING, not by "
+        "exact spelling. Treat singular/plural and synonyms as the same destination "
+        "(e.g. 'restroom' = 'restrooms' = 'bathroom' = 'toilet'; "
+        "'classroom 3-120' matches a range like 'Classrooms 3-111 to 3-125'). "
+        "Then report the DIRECTION of the arrow associated with THAT line: "
         "one of left, right, straight, or unknown.\n"
         "Answer ONLY as compact JSON, no other text, like:\n"
-        '{"destination": "restroom", "direction": "right", '
-        '"route_fact": "the restroom is to the right"}'
+        '{"destination": "restrooms", "direction": "right", '
+        '"matched_sign_line": "Restrooms", '
+        '"route_fact": "the restrooms are to the right"}'
     )
 
 
@@ -88,15 +93,17 @@ def read_sign(model, processor, image: Image.Image, prompt: str = PROMPT):
     text = processor.apply_chat_template(
         conversation, add_generation_prompt=True, tokenize=False)
     inputs = processor(text=[text], images=[image], return_tensors="pt").to(model.device)
+    t0 = time.perf_counter()
     out = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+    elapsed = time.perf_counter() - t0
     trimmed = out[0][inputs.input_ids.shape[1]:]
     resp = processor.decode(trimmed, skip_special_tokens=True).strip()
     # try to parse JSON; if the model added stray text, extract the braces
     try:
         start, end = resp.index("{"), resp.rindex("}") + 1
-        return json.loads(resp[start:end]), resp
+        return json.loads(resp[start:end]), resp, elapsed
     except (ValueError, json.JSONDecodeError):
-        return None, resp
+        return None, resp, elapsed
 
 
 def main():
@@ -129,18 +136,34 @@ def main():
     if not images:
         sys.exit("Give --crops <files> and/or --frame <file> [--box x y w h]")
 
+    t_load0 = time.perf_counter()
     model, processor = load_model()
-    print("\n=== Test 1: teacher sign-reading on real crops ===\n")
+    load_time = time.perf_counter() - t_load0
+    print(f"\n(model load took {load_time:.1f}s — one-time cost, not per-image)\n")
+    print("=== Test 1: teacher sign-reading on real crops ===\n")
+    times = []
     for name, img in images:
-        parsed, raw = read_sign(model, processor, img, prompt)
-        print(f"[{name}]  (size {img.size})")
+        parsed, raw, elapsed = read_sign(model, processor, img, prompt)
+        times.append(elapsed)
+        print(f"[{name}]  (size {img.size})  [inference: {elapsed:.2f}s]")
         if parsed:
             print(f"  destination: {parsed.get('destination')}")
             print(f"  direction  : {parsed.get('direction')}")
+            if parsed.get("matched_sign_line"):
+                print(f"  matched line: {parsed.get('matched_sign_line')}")
             print(f"  route_fact : {parsed.get('route_fact')}")
         else:
             print(f"  (couldn't parse JSON) raw: {raw}")
         print()
+    if times:
+        # first image is often slower (CUDA warmup); report both raw and warm avg
+        print(f"Per-image inference: first={times[0]:.2f}s, "
+              f"avg={sum(times)/len(times):.2f}s", end="")
+        if len(times) > 1:
+            warm = times[1:]
+            print(f", warm-avg={sum(warm)/len(warm):.2f}s (excl. first)")
+        else:
+            print(" (run multiple images for a warm average)")
     print("Verdict to judge yourself: did it get BOTH destination and arrow direction "
           "right, on crops at your real resolution? That's the gate.")
 
