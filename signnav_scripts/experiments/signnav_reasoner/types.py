@@ -97,6 +97,9 @@ class Config:
     stub_detector: bool = False
     stub_reader: bool = False
     stub_reasoner: bool = False
+    # If a REAL model fails to load, do NOT silently serve fake data unless this
+    # is explicitly True. On live/real runs keep this False so failures are loud.
+    allow_stub_fallback: bool = False
 
     # goal for this run (a concrete destination on the signs)
     goal: str = "room 2-130"

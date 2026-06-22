@@ -92,8 +92,21 @@ class Reader:
             self._processor = AutoProcessor.from_pretrained(self.cfg.reasoner_model)
             print(f"[Reader] {self.cfg.reasoner_model} loaded (4bit={self.cfg.reasoner_4bit})")
         except Exception as e:
-            print(f"[Reader] could not load reader model ({e}); falling back to STUB.")
-            self.cfg.stub_reader = True
+            import traceback
+            print("\n" + "!" * 72)
+            print(f"[Reader] FAILED TO LOAD THE VLM: {e}")
+            traceback.print_exc()
+            print("!" * 72)
+            if self.cfg.allow_stub_fallback:
+                print("[Reader] allow_stub_fallback=True -> using FAKE stub reads "
+                      "(NOT real! sign content will be canned).")
+                self.cfg.stub_reader = True
+            else:
+                print("[Reader] Refusing to serve fake data on a real run. "
+                      "Fix the model load above, or pass allow_stub_fallback=True "
+                      "only if you intentionally want the no-model demo.\n")
+                raise RuntimeError(
+                    f"Reader VLM failed to load and stub fallback is disabled: {e}")
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.

@@ -55,7 +55,10 @@ class Monitor:
             print(f"[Monitor] YOLO sign detector loaded ({self.cfg.yolo_model_path})")
             print(f"          YOLO sign-relevant classes: {self._yolo.allowed}")
         except Exception as e:
-            print(f"[Monitor] YOLO sign detector unavailable ({e}); signs STUBBED.")
+            print(f"[Monitor] YOLO sign detector FAILED to load ({e}).")
+            if not self.cfg.allow_stub_fallback:
+                raise RuntimeError(f"YOLO detector failed to load: {e}")
+            print("[Monitor] allow_stub_fallback=True -> signs STUBBED (fake).")
             self._yolo = None
 
     def _load_hazard_detector(self):
@@ -68,7 +71,10 @@ class Monitor:
             self._gdino = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self._gdino_device)
             print(f"[Monitor] GroundingDINO hazard detector loaded on {self._gdino_device}")
         except Exception as e:
-            print(f"[Monitor] GroundingDINO unavailable ({e}); hazards STUBBED.")
+            print(f"[Monitor] GroundingDINO FAILED to load ({e}).")
+            if not self.cfg.allow_stub_fallback:
+                raise RuntimeError(f"GroundingDINO failed to load: {e}")
+            print("[Monitor] allow_stub_fallback=True -> hazards STUBBED (fake).")
             self._gdino = None
 
     def detect_all(self, image, step: int = 0) -> DetectionBundle:
