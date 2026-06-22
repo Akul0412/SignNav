@@ -168,7 +168,8 @@ class Reader:
 
     def _one_read(self, crop, sample: bool) -> dict:
         conv = [{"role": "user", "content": [
-            {"type": "image"}, {"type": "text", "text": PARSE_PROMPT}]}]
+            {"type": "image", "image": crop},
+            {"type": "text", "text": PARSE_PROMPT}]}]
         text = self._processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
         inputs = self._processor(text=[text], images=[crop], return_tensors="pt").to(self._model.device)
         gen = dict(max_new_tokens=200, do_sample=sample)
@@ -176,6 +177,8 @@ class Reader:
             gen["temperature"] = 0.7
         out = self._model.generate(**inputs, **gen)
         resp = self._processor.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        if getattr(self.cfg, "debug_raw_reads", False):
+            print(f"    [raw Qwen read] {resp!r}")
         return _extract_labels(resp)
 
     def _stub_read(self, detection: Detection) -> ReadResult:
