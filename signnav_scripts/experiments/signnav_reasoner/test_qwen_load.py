@@ -1,38 +1,46 @@
 #!/usr/bin/env python3
 """
-test_qwen_load.py - verify Qwen2.5-VL loads WITHOUT torchvision, in isolation.
-
-Run this BEFORE the full live node to confirm the processor loads. Much faster
-to debug than waiting for the whole pipeline.
-    python3 test_qwen_load.py
+test_qwen_load.py - verify Qwen2.5-VL processor loads with PIL backend (no torchvision).
+Run BEFORE the full live node.  python3 test_qwen_load.py
 """
 import sys
-
 MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+print("=== testing Qwen2.5-VL processor load with PIL backend (no torchvision) ===")
 
-print("=== testing Qwen2.5-VL processor load (no torchvision) ===")
+from transformers import AutoTokenizer, Qwen2_5_VLProcessor
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+print("tokenizer OK")
 
-# Route 1: build processor from image processor + tokenizer (no video proc)
+image_processor = None
+# A: backend="pil"
 try:
-    from transformers import Qwen2_5_VLProcessor, AutoImageProcessor, AutoTokenizer
-    ip = AutoImageProcessor.from_pretrained(MODEL)
-    tok = AutoTokenizer.from_pretrained(MODEL)
-    proc = Qwen2_5_VLProcessor(image_processor=ip, tokenizer=tok)
-    print("ROUTE 1 OK: Qwen2_5_VLProcessor(image_processor, tokenizer) works")
-    print("=> use route 1 in reader.py")
-    sys.exit(0)
+    from transformers import AutoImageProcessor
+    image_processor = AutoImageProcessor.from_pretrained(MODEL, backend="pil")
+    print("image processor OK via backend='pil'")
 except Exception as e:
-    print(f"route 1 failed: {e}\n")
+    print(f"route A failed: {e}")
+# B: direct PIL class
+if image_processor is None:
+    try:
+        from transformers import Qwen2VLImageProcessorPil
+        image_processor = Qwen2VLImageProcessorPil.from_pretrained(MODEL)
+        print("image processor OK via Qwen2VLImageProcessorPil")
+    except Exception as e:
+        print(f"route B failed: {e}")
+# C: use_fast=False
+if image_processor is None:
+    try:
+        from transformers import AutoImageProcessor
+        image_processor = AutoImageProcessor.from_pretrained(MODEL, use_fast=False)
+        print("image processor OK via use_fast=False")
+    except Exception as e:
+        print(f"route C failed: {e}")
 
-# Route 2: AutoProcessor use_fast
-try:
-    from transformers import AutoProcessor
-    proc = AutoProcessor.from_pretrained(MODEL, use_fast=True)
-    print("ROUTE 2 OK: AutoProcessor(use_fast=True) works")
-    sys.exit(0)
-except Exception as e:
-    print(f"route 2 failed: {e}\n")
+if image_processor is None:
+    print("\nALL image-processor routes failed. Paste transformers version:")
+    import transformers; print("transformers", transformers.__version__)
+    sys.exit(1)
 
-print("Both routes failed. Qwen processor needs torchvision on this transformers version.")
-print("Options: (a) install a working torchvision, (b) downgrade transformers to a")
-print("version whose Qwen processor doesn't require torchvision for images.")
+proc = Qwen2_5_VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+print("\nSUCCESS: Qwen2_5_VLProcessor built with PIL backend, no torchvision, no video proc.")
+print("=> the live node should now load Qwen. Re-run it.")

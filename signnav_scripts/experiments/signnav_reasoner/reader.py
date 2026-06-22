@@ -112,26 +112,38 @@ class Reader:
                     f"Reader VLM failed to load and stub fallback is disabled: {e}")
 
     def _load_processor_no_video(self):
-        """Build the Qwen2.5-VL processor WITHOUT the video processor (which requires
-        torchvision). We only process still images. Tries several routes and falls
-        back to AutoProcessor if needed."""
-        from transformers import AutoProcessor, AutoTokenizer, AutoImageProcessor
+        """Build the Qwen2.5-VL processor with the PIL image backend and NO video
+        processor (which requires torchvision). We process still images only.
+        The transformers error messages confirm a PIL image backend exists; we use it."""
+        from transformers import AutoTokenizer
         model = self.cfg.reasoner_model
-        # Route 1: construct Qwen2_5_VLProcessor from image processor + tokenizer only
+
+        # get a tokenizer (no torchvision needed)
+        tokenizer = AutoTokenizer.from_pretrained(model)
+
+        # get the PIL-backend image processor (avoids torchvision)
+        image_processor = None
+        # Route A: explicit backend="pil" on the image processor
         try:
-            from transformers import Qwen2_5_VLProcessor
-            image_processor = AutoImageProcessor.from_pretrained(model)
-            tokenizer = AutoTokenizer.from_pretrained(model)
-            return Qwen2_5_VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
-        except Exception as e1:
-            print(f"[Reader] processor route 1 failed ({e1}); trying route 2")
-        # Route 2: AutoProcessor with use_fast (fast path avoids torchvision video proc)
-        try:
-            return AutoProcessor.from_pretrained(model, use_fast=True)
-        except Exception as e2:
-            print(f"[Reader] processor route 2 failed ({e2}); trying route 3")
-        # Route 3: plain AutoProcessor (may pull video proc; last resort)
-        return AutoProcessor.from_pretrained(model)
+            from transformers import AutoImageProcessor
+            image_processor = AutoImageProcessor.from_pretrained(model, backend="pil")
+        except Exception as eA:
+            print(f"[Reader] image proc route A failed ({eA}); trying B")
+        # Route B: import the PIL image processor class directly by name
+        if image_processor is None:
+            try:
+                from transformers import Qwen2VLImageProcessorPil
+                image_processor = Qwen2VLImageProcessorPil.from_pretrained(model)
+            except Exception as eB:
+                print(f"[Reader] image proc route B failed ({eB}); trying C")
+        # Route C: use_fast=False forces the slow/PIL path
+        if image_processor is None:
+            from transformers import AutoImageProcessor
+            image_processor = AutoImageProcessor.from_pretrained(model, use_fast=False)
+
+        # build the Qwen processor from image processor + tokenizer ONLY (no video)
+        from transformers import Qwen2_5_VLProcessor
+        return Qwen2_5_VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
