@@ -89,7 +89,10 @@ class Reader:
                 kw["torch_dtype"] = torch.float16
             self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.cfg.reasoner_model, **kw)
-            self._processor = AutoProcessor.from_pretrained(self.cfg.reasoner_model)
+            # Load the processor WITHOUT the video sub-processor (which hard-requires
+            # torchvision). We process still images only, so build the processor from
+            # the image processor + tokenizer directly.
+            self._processor = self._load_processor_no_video()
             print(f"[Reader] {self.cfg.reasoner_model} loaded (4bit={self.cfg.reasoner_4bit})")
         except Exception as e:
             import traceback
@@ -107,6 +110,28 @@ class Reader:
                       "only if you intentionally want the no-model demo.\n")
                 raise RuntimeError(
                     f"Reader VLM failed to load and stub fallback is disabled: {e}")
+
+    def _load_processor_no_video(self):
+        """Build the Qwen2.5-VL processor WITHOUT the video processor (which requires
+        torchvision). We only process still images. Tries several routes and falls
+        back to AutoProcessor if needed."""
+        from transformers import AutoProcessor, AutoTokenizer, AutoImageProcessor
+        model = self.cfg.reasoner_model
+        # Route 1: construct Qwen2_5_VLProcessor from image processor + tokenizer only
+        try:
+            from transformers import Qwen2_5_VLProcessor
+            image_processor = AutoImageProcessor.from_pretrained(model)
+            tokenizer = AutoTokenizer.from_pretrained(model)
+            return Qwen2_5_VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+        except Exception as e1:
+            print(f"[Reader] processor route 1 failed ({e1}); trying route 2")
+        # Route 2: AutoProcessor with use_fast (fast path avoids torchvision video proc)
+        try:
+            return AutoProcessor.from_pretrained(model, use_fast=True)
+        except Exception as e2:
+            print(f"[Reader] processor route 2 failed ({e2}); trying route 3")
+        # Route 3: plain AutoProcessor (may pull video proc; last resort)
+        return AutoProcessor.from_pretrained(model)
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
