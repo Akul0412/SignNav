@@ -25,10 +25,6 @@ echo "=== start: $(date '+%H:%M:%S') ==="
 # Sign detection: OpenCV dark-panel HEURISTIC (use_yolo=False) — no torchvision needed,
 #   and YOLO can't see indoor signs anyway. Hazards: GroundingDINO. Read+reason: Qwen-7B fp16.
 cd signnav_scripts/experiments
-python -m signnav_reasoner.loop \
-    --frames ../datasets/extracted/rosbag2_keller_c9/frames \
-    --goal "6-146" \
-    --every 5 \
-    2>&1
-
+# in the sbatch script, after the env activation that run_loop_test.sh already has:
+python3 debug_one_read.py --image debug_crops/frame0001_crop.jpg
 echo "=== end: $(date '+%H:%M:%S') ==="
