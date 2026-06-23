@@ -101,7 +101,7 @@ class Config:
     read_confidence_threshold: float = 0.70   # >= this => commit; a clean parse scores 0.7,
                                               # stable re-reads push higher (see reader.py)
     detect_confidence_threshold: float = 0.35 # detector min confidence to count as a detection
-    hazard_confidence_threshold: float = 0.55 # HIGHER bar for hazards (reduces false stairs
+    hazard_confidence_threshold: float = 0.48   # was 0.55; catches real stairs (0.47-0.53 in testing) # HIGHER bar for hazards (reduces false stairs
                                               # from the word 'stairs' printed on signs)
 
     # debug
@@ -117,7 +117,9 @@ class Config:
     yolo_model_path: str = "yolov8n.pt"
     yolo_imgsz: int = 640
     crop_margin: float = 0.10
-    device: str = ""                          # "" -> auto; "cpu" or "0" to force
+    device: str = ""       
+    sign_confidence_threshold: float = 0.85
+                       # "" -> auto; "cpu" or "0" to force
 
     # model selection / resources (Jetson-friendly defaults)
     reasoner_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"

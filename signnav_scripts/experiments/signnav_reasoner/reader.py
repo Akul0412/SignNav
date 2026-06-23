@@ -22,8 +22,8 @@ from .types import Config, Detection, ReadResult
 PARSE_PROMPT = (
     "Read this building directional sign. Directory signs group destinations under "
     "arrows (up=straight, left, right); a destination takes the arrow of the group "
-    "above it. List each destination with its direction. If you cannot read it "
-    "clearly, return an empty object. Answer ONLY compact JSON: "
+    "above it. Transcribe every destination you can see and its arrow direction. "
+    "Read whatever text is visible, even if partially. Answer ONLY compact JSON: "
     '{"labels": {"DEST": "left|right|straight", ...}}'
 )
 
