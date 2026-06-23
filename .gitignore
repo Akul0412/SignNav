@@ -36,3 +36,4 @@ signnav_scripts/experiments/live_logs/
 signnav_scripts/experiments/debug_crops/
 signnav_scripts/experiments/__pycache__/
 signnav_scripts/experiments/signnav_reasoner/__pycache__/
+.idea/
