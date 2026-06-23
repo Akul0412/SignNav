@@ -10,7 +10,7 @@ tested, and swapped (real model <-> stub) independently.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 
 class ObjectClass(str, Enum):
@@ -61,6 +61,37 @@ class Decision:
     rationale: str                    # human-readable reasoning trace
     triggered_by: ObjectClass = ObjectClass.NONE
     read: Optional[ReadResult] = None
+
+
+@dataclass
+class DecisionRecord:
+    """One committed decision in the journey — appended to history, not per frame."""
+    leg: int
+    sign_text: dict        # what the sign said, e.g. {"6-201 to 6-225": "left"}
+    action: ActionType
+    rationale: str         # full reasoning trace from the VLM
+    ts: str = ""           # frame timestamp when the decision was made
+
+
+@dataclass
+class JourneyState:
+    """Persistent memory for a full multi-leg journey."""
+    goal: str
+    current_leg: int = 0
+    history: List[DecisionRecord] = field(default_factory=list)
+    last_sign_text: dict = field(default_factory=dict)  # sign we most recently acted on (dedup)
+    progress_note: str = ""   # crude heuristic note updated after each leg
+    arrived: bool = False
+
+    def summary(self, max_legs: int = 5) -> str:
+        """Compact history string for the VLM memory context."""
+        if not self.history:
+            return "(just started)"
+        recent = self.history[-max_legs:]
+        parts = [f"leg {r.leg}: {r.action.value} (saw {list(r.sign_text.keys())})"
+                 for r in recent]
+        note = f" | {self.progress_note}" if self.progress_note else ""
+        return "; ".join(parts) + note
 
 
 @dataclass

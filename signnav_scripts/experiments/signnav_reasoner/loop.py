@@ -24,7 +24,8 @@ import argparse
 import time
 from pathlib import Path
 
-from .types import ActionType, Config, ObjectClass
+from typing import Optional
+from .types import ActionType, Config, Decision, ObjectClass
 from .monitor import Monitor
 from .reader import Reader
 from .reasoner import Reasoner
@@ -52,8 +53,15 @@ class AdaptiveReasoningLoop:
         self.dbg = DebugLogger(level=config.debug_level)
         print(f"=== ready. goal: '{config.goal}' ===\n")
 
-    def step(self, image, idx: int, total: int = 0, ts: str = ""):
-        """Process one frame through the full loop, with clear debug logging."""
+    def step(self, image, idx: int, total: int = 0, ts: str = "",
+             memory_override: Optional[str] = None) -> Optional[Decision]:
+        """Process one frame through the full loop.
+
+        Returns the committed Decision when one is made this frame, else None.
+        memory_override: when provided (e.g. by JourneyLoop), used as the memory
+        context for VLM calls instead of the internal _memory string.  The caller
+        is then responsible for memory bookkeeping.
+        """
         dbg = self.dbg
         dbg.frame_header(idx, total, ts)
 
@@ -62,22 +70,26 @@ class AdaptiveReasoningLoop:
         dbg.detectors(bundle.sign_dets, bundle.hazard_dets)
         dbg.chosen(det)
 
+        # pick which memory string the VLM sees
+        mem = memory_override if memory_override is not None else self._memory
+
         # --- nothing relevant: keep going ---
         if det.cls == ObjectClass.NONE:
             self.controller.continue_previous()
             dbg.action(self.controller.current_action.value, "continuing previous")
             self._approach_steps = 0
-            return
+            return None
 
         # --- hazard: VLM reasons about what it means ---
         if det.cls in (ObjectClass.STAIRS, ObjectClass.OBSTACLE):
-            decision = self.reasoner.reason_hazard(image, det, self._memory)
+            decision = self.reasoner.reason_hazard(image, det, mem)
             dbg.reasoning(decision.rationale)
             self.controller.execute(decision)
             dbg.action(decision.action.value)
-            self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
+            if memory_override is None:
+                self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
             self._approach_steps = 0
-            return
+            return decision
 
         # --- sign: read with confidence gate ---
         read = self.reader.read(image, det, frame_idx=idx)
@@ -93,15 +105,17 @@ class AdaptiveReasoningLoop:
                 print("  ACTION: approach cap reached; continuing forward")
                 self.controller.continue_previous()
             dbg.action(self.controller.current_action.value)
-            return
+            return None
 
         # high confidence -> commit to chain-of-thought reasoning
         self._approach_steps = 0
-        decision = self.reasoner.reason_sign(image, read, self.cfg.goal, self._memory)
+        decision = self.reasoner.reason_sign(image, read, self.cfg.goal, mem)
         dbg.reasoning(decision.rationale)
         self.controller.execute(decision)
         dbg.action(decision.action.value)
-        self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
+        if memory_override is None:
+            self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
+        return decision
 
     def run_on_folder(self, folder: str):
         from PIL import Image
