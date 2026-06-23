@@ -136,6 +136,9 @@ class Config:
     # is explicitly True. On live/real runs keep this False so failures are loud.
     allow_stub_fallback: bool = False
 
+    # backend selection (swap for evaluation)
+    vlm_backend: str = "qwen"              # "qwen" (local) — future: "gemini"
+
     # goal for this run (a concrete destination on the signs)
     goal: str = "room 2-130"
 

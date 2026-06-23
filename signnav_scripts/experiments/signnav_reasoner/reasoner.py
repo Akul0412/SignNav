@@ -22,6 +22,7 @@ letting reasoning be general.
 import json
 from typing import Optional
 
+from .interfaces import VLMInterface
 from .types import ActionType, Config, Decision, Detection, ObjectClass, ReadResult
 
 
@@ -64,13 +65,12 @@ _DECISION_WORDS = {
 
 
 class Reasoner:
-    def __init__(self, config: Config, vlm=None):
-        """vlm: a callable (prompt, image)->text, or None to lazy-share the Reader's model.
-        In the loop we pass the Reader's loaded VLM so we don't load a second model."""
+    def __init__(self, config: Config, vlm: Optional[VLMInterface] = None):
+        """vlm: shared VLMInterface (same instance as Reader's); None only when stubbing."""
         self.cfg = config
         self._vlm = vlm
 
-    def set_vlm(self, vlm):
+    def set_vlm(self, vlm: VLMInterface):
         self._vlm = vlm
 
     # ---------- hazard branch ----------
@@ -99,7 +99,7 @@ class Reasoner:
             "Format:\nREASONING:\n1. (describe what you actually see in the image)\n2. ...\n"
             "DECISION: <action>"
         )
-        text = self._vlm(prompt, image)
+        text = self._vlm.generate(prompt, image)
         return self._parse(text, triggered_by=detection.cls)
 
     # ---------- sign branch: chain-of-thought reasoning over the read facts ----------
@@ -110,7 +110,7 @@ class Reasoner:
                 rationale=f"(stub) read {read.structured}; would reason here.",
                 triggered_by=ObjectClass.SIGN, read=read)
         prompt = build_reasoning_prompt(goal, read.structured, memory_summary)
-        text = self._vlm(prompt, image)              # VLM reasons step by step
+        text = self._vlm.generate(prompt, image)      # VLM reasons step by step
         decision = self._parse(text, triggered_by=ObjectClass.SIGN)
         decision.read = read
         return decision

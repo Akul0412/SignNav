@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from typing import Optional
+from .interfaces import make_vlm
 from .types import ActionType, Config, Decision, ObjectClass
 from .monitor import Monitor
 from .reader import Reader
@@ -42,10 +43,10 @@ class AdaptiveReasoningLoop:
         self.cfg = config
         print("=== initializing adaptive-reasoning loop ===")
         self.monitor = Monitor(config)
-        self.reader = Reader(config)
-        self.reasoner = Reasoner(config)
-        # share the Reader's loaded VLM with the Reasoner (one model, two uses)
-        self.reasoner.set_vlm(self.reader.vlm_call)
+        # one VLM instance shared by Reader and Reasoner — model loads once
+        vlm = make_vlm(config) if not config.stub_reader else None
+        self.reader = Reader(config, vlm=vlm)
+        self.reasoner = Reasoner(config, vlm=vlm)
         self.controller = Controller()
         self._approach_steps = 0
         self._memory = ""                  # running summary of decisions (chain-of-thought memory)

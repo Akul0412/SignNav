@@ -16,7 +16,9 @@ a more principled signal (token logprobs, a legibility head, etc.) to be refined
 """
 
 import json
+from typing import Optional
 
+from .interfaces import VLMInterface
 from .types import Config, Detection, ReadResult
 
 PARSE_PROMPT = (
@@ -70,45 +72,9 @@ def _labels_match(a: dict, b: dict) -> bool:
 
 
 class Reader:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, vlm: Optional[VLMInterface] = None):
         self.cfg = config
-        self._model = None
-        if not config.stub_reader:
-            self._load()
-
-    def _load(self):
-        try:
-            import torch
-            from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
-            kw = {"device_map": "auto"}
-            if self.cfg.reasoner_4bit:
-                kw["quantization_config"] = BitsAndBytesConfig(
-                    load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True)
-            else:
-                kw["torch_dtype"] = torch.float16
-            self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.cfg.reasoner_model, **kw)
-            # transformers 4.x: plain AutoProcessor works and includes the chat template
-            from transformers import AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(self.cfg.reasoner_model)
-            print(f"[Reader] {self.cfg.reasoner_model} loaded (4bit={self.cfg.reasoner_4bit})")
-        except Exception as e:
-            import traceback
-            print("\n" + "!" * 72)
-            print(f"[Reader] FAILED TO LOAD THE VLM: {e}")
-            traceback.print_exc()
-            print("!" * 72)
-            if self.cfg.allow_stub_fallback:
-                print("[Reader] allow_stub_fallback=True -> using FAKE stub reads "
-                      "(NOT real! sign content will be canned).")
-                self.cfg.stub_reader = True
-            else:
-                print("[Reader] Refusing to serve fake data on a real run. "
-                      "Fix the model load above, or pass allow_stub_fallback=True "
-                      "only if you intentionally want the no-model demo.\n")
-                raise RuntimeError(
-                    f"Reader VLM failed to load and stub fallback is disabled: {e}")
+        self.vlm = vlm   # shared VLMInterface; None only when stub_reader=True
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
@@ -167,16 +133,7 @@ class Reader:
         )
 
     def _one_read(self, crop, sample: bool) -> dict:
-        conv = [{"role": "user", "content": [
-            {"type": "image"},
-            {"type": "text", "text": PARSE_PROMPT}]}]
-        text = self._processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
-        inputs = self._processor(text=[text], images=[crop], return_tensors="pt").to(self._model.device)
-        gen = dict(max_new_tokens=200, do_sample=sample)
-        if sample:
-            gen["temperature"] = 0.7
-        out = self._model.generate(**inputs, **gen)
-        resp = self._processor.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        resp = self.vlm.generate(PARSE_PROMPT, crop, sample=sample, max_new_tokens=200)
         print(f"    [raw Qwen read] {resp!r}")
         return _extract_labels(resp)
 
@@ -191,15 +148,3 @@ class Reader:
         return ReadResult(
             text=json.dumps(parsed), read_confidence=round(conf, 2),
             structured=parsed, can_decide=conf >= self.cfg.read_confidence_threshold)
-
-    def vlm_call(self, prompt: str, image) -> str:
-        """Generic single VLM call (prompt + image -> text). Shared with the Reasoner
-        so we don't load a second model. Returns '' if no model (stub)."""
-        if self._model is None:
-            return ""
-        conv = [{"role": "user", "content": [
-            {"type": "image"}, {"type": "text", "text": prompt}]}]
-        text = self._processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
-        inputs = self._processor(text=[text], images=[image], return_tensors="pt").to(self._model.device)
-        out = self._model.generate(**inputs, max_new_tokens=400, do_sample=False)
-        return self._processor.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
