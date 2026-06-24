@@ -158,13 +158,15 @@ Controller.execute_forward_to_read = _execute_forward_to_read
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--frames", help="Folder of .jpg frames (a recorded trip) to run on")
+    ap.add_argument("--frames",  help="Folder of .jpg frames — short-horizon inner-loop mode")
+    ap.add_argument("--journey", help="Trip directory (frames/, odom.csv, frame_index.csv) "
+                                      "— long-horizon JourneyLoop mode")
     ap.add_argument("--goal", default="room 2-130")
     ap.add_argument("--every", type=int, default=1)
     ap.add_argument("--stub-all", action="store_true",
-                    help="Run with ALL components stubbed (no models) — tests the loop logic only")
+                    help="Run with ALL components stubbed (no models) — tests loop logic only")
     ap.add_argument("--stub-detector", action="store_true")
-    ap.add_argument("--stub-reader", action="store_true")
+    ap.add_argument("--stub-reader",   action="store_true")
     ap.add_argument("--stub-reasoner", action="store_true")
     args = ap.parse_args()
 
@@ -172,22 +174,26 @@ def main():
     if args.stub_all:
         cfg.stub_detector = cfg.stub_reader = cfg.stub_reasoner = True
     cfg.stub_detector = cfg.stub_detector or args.stub_detector
-    cfg.stub_reader = cfg.stub_reader or args.stub_reader
+    cfg.stub_reader   = cfg.stub_reader   or args.stub_reader
     cfg.stub_reasoner = cfg.stub_reasoner or args.stub_reasoner
 
-    loop = AdaptiveReasoningLoop(cfg)
+    inner = AdaptiveReasoningLoop(cfg)
 
-    if args.frames:
-        loop.run_on_folder(args.frames)
+    if args.journey:
+        from .journey import JourneyLoop
+        jloop = JourneyLoop(cfg, inner)
+        jloop.run_on_trip(args.journey)
+    elif args.frames:
+        inner.run_on_folder(args.frames)
     else:
-        # no frames given: run the fully-stubbed scripted scenario to show the loop
-        print("(no --frames given; running scripted STUB scenario to demo the loop)\n")
+        # no source given: run the fully-stubbed scripted scenario to demo the inner loop
+        print("(no --frames or --journey given; running scripted STUB scenario)\n")
         cfg.stub_detector = cfg.stub_reader = True
-        loop = AdaptiveReasoningLoop(cfg)
+        inner = AdaptiveReasoningLoop(cfg)
         from PIL import Image
         blank = Image.new("RGB", (1920, 1280))
         for i in range(11):
-            loop.step(blank, i)
+            inner.step(blank, i)
             time.sleep(0.05)
 
 

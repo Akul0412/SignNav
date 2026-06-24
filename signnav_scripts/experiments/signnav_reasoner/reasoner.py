@@ -115,6 +115,52 @@ class Reasoner:
         decision.read = read
         return decision
 
+    # ---------- arrival check: have we reached the goal? ----------
+    def check_arrival(self, image, read_or_none: Optional[ReadResult], goal: str) -> bool:
+        """Return True only when the scene shows clear evidence of having reached the goal.
+
+        Conservative by design: ambiguous or unparseable responses → False.
+        Not called anywhere yet; the JourneyLoop will call this in Step 4.
+        """
+        if self.cfg.stub_reasoner or self._vlm is None:
+            return False   # conservative: don't declare arrival without real reasoning
+
+        sign_context = (
+            f"LATEST SIGN READ (for context): {json.dumps(read_or_none.structured)}\n"
+            if read_or_none and read_or_none.structured else ""
+        )
+        prompt = (
+            f"You are a wheeled indoor delivery robot. Your goal is: \"{goal}\".\n\n"
+            "CRITICAL DISTINCTION — read this carefully before answering:\n"
+            "  NOT ARRIVED: a directional sign saying '{goal} → right' or 'this way to {goal}' "
+            "means the goal is AHEAD in that direction. You are still navigating toward it.\n"
+            "  ARRIVED: a door plate, room number plate, or entrance sign mounted directly "
+            "ON or immediately beside the destination itself — the kind placed on the actual "
+            "room or office door. You can see the goal's own entrance, not a pointer to it.\n\n"
+            f"{sign_context}"
+            f"Look at this scene. Is there clear evidence that \"{goal}\" is HERE — "
+            "specifically, can you see a door plate, room marker, or entrance that directly "
+            "identifies this location as the goal?\n\n"
+            "Reason briefly (1-3 sentences), then end with exactly one of:\n"
+            "ARRIVED: yes\n"
+            "ARRIVED: no\n\n"
+            "Answer 'yes' ONLY if you can clearly see the goal's own door/plate/marker "
+            "immediately in front of you. If the scene shows a directory sign pointing "
+            "toward the goal, or if you are uncertain, answer 'no'."
+        )
+        text = self._vlm.generate(prompt, image)
+        return self._parse_arrival(text)
+
+    @staticmethod
+    def _parse_arrival(text: str) -> bool:
+        """Extract the ARRIVED line; conservative — only True on explicit 'yes'."""
+        for line in reversed(text.splitlines()):   # scan from the end (answer is last)
+            stripped = line.strip().upper()
+            if stripped.startswith("ARRIVED:"):
+                answer = stripped.split(":", 1)[-1].strip()
+                return answer == "YES"
+        return False   # no parseable line found → not arrived
+
     def _parse(self, text: str, triggered_by: ObjectClass) -> Decision:
         """Pull the DECISION line out; keep the full chain-of-thought as the rationale."""
         action = ActionType.CONTINUE

@@ -71,6 +71,7 @@ class DecisionRecord:
     action: ActionType
     rationale: str         # full reasoning trace from the VLM
     ts: str = ""           # frame timestamp when the decision was made
+    turn_magnitude_deg: float = 0.0   # actual turn recorded from odom (updated after leg completes; logging only)
 
 
 @dataclass
@@ -145,3 +146,12 @@ class Config:
     # loop behavior
     every_n_frames: int = 1           # process every Nth frame from the source
     max_approach_steps: int = 8       # safety cap on "keep approaching to read"
+
+    # odom-based completion detection — motion-settled (all tunable against a recording)
+    # a leg is done when the robot was moving and then its displacement goes quiet
+    odom_sample_ms: float = 75.0          # cadence at which is_done() samples odom (ms)
+    motion_window_ms: float = 500.0       # recent window over which progress is measured (ms)
+    motion_active_thresh: float = 0.10    # m — recent-window disp > this => robot is moving
+    motion_settle_thresh: float = 0.03    # m — recent-window disp < this => stopped making progress
+    settle_debounce_ms: float = 1000.0    # ms — must stay settled this long before declaring done
+    leg_timeout_sec: float = 30.0         # s  — generous fallback if motion never settles

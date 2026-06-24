@@ -109,10 +109,11 @@ class Monitor:
         sign_best = sign_dets[0] if sign_dets else None
 
         hazard_ok = hazard_best and hazard_best["confidence"] >= self.cfg.hazard_confidence_threshold
+        sign_ok = sign_best and sign_best["confidence"] >= self.cfg.sign_confidence_threshold
         if hazard_ok:
             chosen = Detection(ObjectClass.STAIRS, hazard_best["confidence"],
                                hazard_best["box_xywh"], hazard_best["label"])
-        elif sign_best:
+        elif sign_ok:
             cx1, cy1, cx2, cy2 = sign_best["crop_box"]
             chosen = Detection(ObjectClass.SIGN, sign_best["confidence"],
                                (cx1, cy1, cx2 - cx1, cy2 - cy1), sign_best["class_name"])
