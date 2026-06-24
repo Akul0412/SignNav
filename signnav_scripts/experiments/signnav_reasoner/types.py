@@ -99,10 +99,10 @@ class JourneyState:
 class Config:
     """Tunables + stub switches so the loop runs even when models can't load."""
     # confidence gating
-    read_confidence_threshold: float = 0.70   # >= this => commit; a clean parse scores 0.7,
+    read_confidence_threshold: float = 0.87   # >= this => commit; a clean parse scores 0.7,
                                               # stable re-reads push higher (see reader.py)
     detect_confidence_threshold: float = 0.35 # detector min confidence to count as a detection
-    hazard_confidence_threshold: float = 0.48   # was 0.55; catches real stairs (0.47-0.53 in testing) # HIGHER bar for hazards (reduces false stairs
+    hazard_confidence_threshold: float = 0.60   #catches real stairs (0.47-0.53 in testing) # HIGHER bar for hazards (reduces false stairs
                                               # from the word 'stairs' printed on signs)
 
     # debug
@@ -114,13 +114,17 @@ class Config:
     sign_prompt: str = "directional sign . room number sign . wall sign"
     hazard_prompt: str = "stairs . staircase . steps . obstacle"
 
-    # YOLO sign detector (Yehor's pipeline) settings
+    # YOLO sign detector settings
     yolo_model_path: str = "yolov8n.pt"
     yolo_imgsz: int = 640
     crop_margin: float = 0.10
-    device: str = ""       
     sign_confidence_threshold: float = 0.85
-                       # "" -> auto; "cpu" or "0" to force
+    device: str = ""
+    # multi-crop: skip a VLM read on candidate panels smaller than this fraction of the
+    # frame (filters tiny spurious dark regions surfaced when returning all candidates).
+    # Keep BELOW your smallest real sign — c11's hard sign read at ~0.42%, and the
+    # heuristic already floors candidates at 0.25%, so the useful band is ~0.0030–0.0040.
+    min_read_area_ratio: float = 0.003
 
     # model selection / resources (Jetson-friendly defaults)
     reasoner_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -129,12 +133,9 @@ class Config:
                                               # signs come from the OpenCV dark-panel heuristic
 
     # STUB SWITCHES — flip to True if a model can't load (memory/hardware),
-    # so the architecture/loop still runs end-to-end with mocks.
     stub_detector: bool = False
     stub_reader: bool = False
     stub_reasoner: bool = False
-    # If a REAL model fails to load, do NOT silently serve fake data unless this
-    # is explicitly True. On live/real runs keep this False so failures are loud.
     allow_stub_fallback: bool = False
 
     # backend selection (swap for evaluation)
@@ -157,3 +158,5 @@ class Config:
     motion_settle_thresh: float = 0.03    # m — recent-window disp < this => stopped making progress
     settle_debounce_ms: float = 1000.0    # ms — must stay settled this long before declaring done
     leg_timeout_sec: float = 30.0         # s  — generous fallback if motion never settles
+
+    reread_cooldown_frames: int = 4

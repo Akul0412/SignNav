@@ -65,6 +65,34 @@ def expand_bbox(bbox, image_width, image_height, margin) -> Tuple[int, int, int,
     cy2 = min(image_height, int(y2 + dy + 0.9999))
     return cx1, cy1, cx2, cy2
 
+def _iou(a, b) -> float:
+    """IoU of two (x1,y1,x2,y2) boxes."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def nms_candidates(cands, iou_thresh: float = 0.45):
+    """Greedy NMS over candidate dicts (each has 'bbox' + 'score'). Keeps the
+    highest-scoring box and drops overlapping duplicates of the SAME panel — the
+    component/contour passes can emit several boxes for one sign. Returns survivors
+    best-first."""
+    ordered = sorted(cands, key=lambda d: d["score"], reverse=True)
+    kept = []
+    for c in ordered:
+        if all(_iou(c["bbox"], k["bbox"]) <= iou_thresh for k in kept):
+            kept.append(c)
+    return kept
+
 
 def detections_from_result(
     result: object,
@@ -173,7 +201,7 @@ class LiveSignDetector:
 import math
 
 
-def choose_heuristic_sign(cv2_module, image):
+def choose_heuristic_sign(cv2_module, image, return_all: bool = False):
     """Find a likely indoor wayfinding sign (dark panel). Returns dict with
     'bbox' (x1,y1,x2,y2 in full-res), 'score', 'source', 'box_area_ratio', or None.
     Ported from Yehor's batch detector for live per-frame use."""
@@ -304,6 +332,8 @@ def choose_heuristic_sign(cv2_module, image):
         if c is not None:
             dark_candidates.append(c)
     if dark_candidates:
+        if return_all:
+            return nms_candidates(dark_candidates)
         return max(dark_candidates, key=lambda d: d["score"])
 
     # Pass 2: non-black signs (round plaques etc.)
@@ -316,5 +346,7 @@ def choose_heuristic_sign(cv2_module, image):
         if c is not None:
             edge_candidates.append(c)
     if not edge_candidates:
-        return None
+        return [] if return_all else None
+    if return_all:
+        return nms_candidates(edge_candidates)
     return max(edge_candidates, key=lambda d: d["score"])

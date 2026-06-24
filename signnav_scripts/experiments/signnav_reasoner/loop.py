@@ -49,6 +49,7 @@ class AdaptiveReasoningLoop:
         self.reasoner = Reasoner(config, vlm=vlm)
         self.controller = Controller()
         self._approach_steps = 0
+        self._read_cooldown = 0            # frames left to coast before re-reading a sign
         self._memory = ""                  # running summary of decisions (chain-of-thought memory)
         from .debug import DebugLogger
         self.dbg = DebugLogger(level=config.debug_level)
@@ -117,13 +118,25 @@ class AdaptiveReasoningLoop:
 
         # --- sign: read with confidence gate ---
         _t0 = time.perf_counter()
-        read = self.reader.read(image, det, frame_idx=idx)
+        # re-read cooldown: after a sub-threshold read, coast forward K frames
+        # without spending VLM reads — the robot's own motion brings the sign
+        # nearer so the next read is bigger. Cooldown frames do NOT count against
+        # max_approach_steps (that budget counts read attempts).
+        if getattr(self, "_read_cooldown", 0) > 0:
+            self._read_cooldown -= 1
+            print(f"  COOLDOWN: skip re-read ({self._read_cooldown} left) — approaching")
+            self.controller.execute_forward_to_read()
+            dbg.action(self.controller.current_action.value)
+            self._log_timing(t_frame, t_detect)
+            return None
+        read = self.reader.read_best_for_goal(image, bundle.sign_dets, self.cfg.goal, frame_idx=idx)
         t_read = time.perf_counter() - _t0
         dbg.crop(read.crop_box, read.crop_size, read.crop_path, read.src_size)
         dbg.read(read)
 
         if not read.can_decide:
             self._approach_steps += 1
+            self._read_cooldown = getattr(self.cfg, "reread_cooldown_frames", 4)
             if self._approach_steps <= self.cfg.max_approach_steps:
                 dbg.approach(self._approach_steps, self.cfg.max_approach_steps)
                 self.controller.execute_forward_to_read()
@@ -135,7 +148,9 @@ class AdaptiveReasoningLoop:
             return None
 
         # high confidence -> commit to chain-of-thought reasoning
+        self._read_cooldown = 0
         self._approach_steps = 0
+
         _t0 = time.perf_counter()
         decision = self.reasoner.reason_sign(image, read, self.cfg.goal, mem)
         t_reason = time.perf_counter() - _t0

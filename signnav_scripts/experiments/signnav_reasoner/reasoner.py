@@ -17,6 +17,15 @@ reasoning trace you would later DISTILL into OmniVLA.
 Two-call design (chosen): Reader extracts facts (reliable perception) -> Reasoner
 reasons over those facts (open reasoning). Keeps perception trustworthy while
 letting reasoning be general.
+
+SCENE ALERT (notice/hazard awareness): when the monitor's notice channel flags a
+posted notice / floor sign / placard / obstacle in view, reason_sign is called with
+scene_alert=True, which adds a clause telling the VLM to examine the WHOLE frame —
+not just the directory sign — read any such notice itself, and treat a closed /
+blocked / relocated goal as a route that does NOT achieve the goal (-> reroute/stop).
+There is NO notice OCR or schema here: the VLM reads and interprets the scene
+directly. The detector only decides WHEN to look hard (cheap trigger -> expensive
+reasoning); the VLM does all the interpreting.
 """
 
 import json
@@ -28,7 +37,22 @@ from .types import ActionType, Config, Decision, Detection, ObjectClass, ReadRes
 
 # The chain-of-thought reasoning prompt. The model thinks step by step, then commits.
 # Note: NO hardcoded prohibitions — the model reasons about what it sees.
-def build_reasoning_prompt(goal: str, sign_facts: dict, memory_summary: str) -> str:
+def build_reasoning_prompt(goal: str, sign_facts: dict, memory_summary: str,
+                           scene_alert: bool = False) -> str:
+    # When something notice-like was detected in the scene, tell the VLM to look at the
+    # whole image and interpret it. No fixed rules — the VLM decides what it means.
+    alert_block = ""
+    if scene_alert:
+        alert_block = (
+            "IMPORTANT — look at the ENTIRE image, not only the directory sign. A posted "
+            "notice, floor sign, placard, cone, or obstacle has been detected in the scene. "
+            "Read any such notice yourself and judge what it means for you. If it indicates "
+            "that your GOAL, or the path you would take to reach it, is closed, blocked, out "
+            "of service, relocated, or otherwise unavailable, then following the directory "
+            "sign does NOT achieve your goal — do not commit to that route. Describe what you "
+            "see and choose reroute (or stop) instead. If the notice is unrelated to your "
+            "goal and your path, note it and proceed normally.\n\n"
+        )
     return (
         "You are the reasoning module of an indoor wheeled delivery robot. You reason "
         "step by step about what to do next, like a careful driver.\n\n"
@@ -37,6 +61,7 @@ def build_reasoning_prompt(goal: str, sign_facts: dict, memory_summary: str) -> 
         "delivery robot, not staff (you must respect access restrictions). Safety first.\n\n"
         f"WHAT YOU JUST READ ON THE SIGN(S): {json.dumps(sign_facts)}\n"
         f"WHAT YOU'VE DONE SO FAR: {memory_summary or '(just started)'}\n\n"
+        f"{alert_block}"
         "Reason through this ONE STEP AT A TIME. Think about:\n"
         "  - Which entries on the sign are relevant to your goal, and what direction they imply.\n"
         "  - Whether any entry is a RESTRICTION or WARNING that affects you (think about what "
@@ -103,13 +128,18 @@ class Reasoner:
         return self._parse(text, triggered_by=detection.cls)
 
     # ---------- sign branch: chain-of-thought reasoning over the read facts ----------
-    def reason_sign(self, image, read: ReadResult, goal: str, memory_summary: str = "") -> Decision:
+    def reason_sign(self, image, read: ReadResult, goal: str, memory_summary: str = "",
+                    scene_alert: bool = False) -> Decision:
+        """scene_alert: set True when the monitor flagged a notice/obstacle in the scene.
+        It adds a clause that makes the VLM examine the whole frame and treat a closed /
+        blocked / relocated goal as a route that does NOT achieve the goal."""
         if self.cfg.stub_reasoner or self._vlm is None:
             return Decision(
                 action=ActionType.FORWARD,
                 rationale=f"(stub) read {read.structured}; would reason here.",
                 triggered_by=ObjectClass.SIGN, read=read)
-        prompt = build_reasoning_prompt(goal, read.structured, memory_summary)
+        prompt = build_reasoning_prompt(goal, read.structured, memory_summary,
+                                        scene_alert=scene_alert)
         text = self._vlm.generate(prompt, image)      # VLM reasons step by step
         decision = self._parse(text, triggered_by=ObjectClass.SIGN)
         decision.read = read

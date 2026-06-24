@@ -1,10 +1,10 @@
 """
 Monitor: the cheap, always-on perceptual trigger - with TWO detectors.
 
-  SIGNS   -> Yehor's YOLO pipeline (via shared convert/sign_detection.py)
-  HAZARDS -> GroundingDINO (open-vocab), prompted for stairs/steps/obstacle
+  SIGNS    -> Yehor's YOLO pipeline (via shared convert/sign_detection.py)
+  HAZARDS  -> GroundingDINO (open-vocab), prompted for stairs/steps/obstacle
 
-detect_all() returns the RAW output of BOTH detectors plus the chosen detection,
+detect_all() returns the RAW output of ALL detectors plus the chosen detection,
 so the debug logger can show everything (this is how we caught GroundingDINO
 firing on the printed word 'stairs').
 
@@ -33,8 +33,8 @@ if str(_CONVERT) not in sys.path:
 class DetectionBundle:
     """Everything the monitor saw this frame (for debugging + decision)."""
     chosen: Detection
-    sign_dets: List[dict]       # raw YOLO detections (dicts)
-    hazard_dets: List[dict]     # raw GroundingDINO detections (dicts)
+    sign_dets: List[dict]                              # raw YOLO/heuristic detections (dicts)
+    hazard_dets: List[dict]                            # raw GroundingDINO hazard detections (dicts)
 
 
 class Monitor:
@@ -96,7 +96,7 @@ class Monitor:
             self._gdino = None
 
     def detect_all(self, image, step: int = 0) -> DetectionBundle:
-        """Run BOTH detectors, return raw results + the chosen detection."""
+        """Run ALL detectors, return raw results + the chosen detection."""
         if self.cfg.stub_detector:
             d = self._stub_detect(step)
             return DetectionBundle(chosen=d, sign_dets=[], hazard_dets=[])
@@ -127,7 +127,8 @@ class Monitor:
                                (cx1, cy1, cx2 - cx1, cy2 - cy1), sign_best["class_name"])
         # NOTE: a below-threshold hazard with no sign => NONE (ignored as false positive)
 
-        return DetectionBundle(chosen=chosen, sign_dets=sign_dets, hazard_dets=hazard_dets)
+        return DetectionBundle(chosen=chosen, sign_dets=sign_dets,
+                               hazard_dets=hazard_dets)
 
     # backward-compatible single-detection entry
     def detect(self, image, step: int = 0) -> Detection:
@@ -142,31 +143,41 @@ class Monitor:
             from sign_detection import choose_heuristic_sign, expand_bbox
             arr = np.array(image)[:, :, ::-1]   # PIL RGB -> BGR
             h, w = arr.shape[:2]
-            hc = choose_heuristic_sign(self._cv2, arr)
-            if hc is None or hc["score"] < 0.30:
-                return []
-            x1, y1, x2, y2 = hc["bbox"]
-            d = {"bbox": (x1, y1, x2, y2), "confidence": float(hc["score"]),
-                 "class_id": -1, "class_name": f"heuristic_{hc['source']}",
-                 "score": float(hc["score"]), "box_area_ratio": hc["box_area_ratio"]}
-            d["crop_box"] = expand_bbox(d["bbox"], w, h, self.cfg.crop_margin)
-            return [d]
+            # return ALL candidate panels (NMS'd, best-first), not just the top one,
+            # so two signs on the same wall can both be read and the goal-relevant one
+            # selected downstream. Single-sign behavior is unchanged: sign_dets[0] is
+            # still the top-scoring panel that detect_all() picks as `chosen`.
+            cands = choose_heuristic_sign(self._cv2, arr, return_all=True)
+            out = []
+            for hc in cands:
+                if hc["score"] < 0.30:
+                    continue
+                x1, y1, x2, y2 = hc["bbox"]
+                d = {"bbox": (x1, y1, x2, y2), "confidence": float(hc["score"]),
+                     "class_id": -1, "class_name": f"heuristic_{hc['source']}",
+                     "score": float(hc["score"]), "box_area_ratio": hc["box_area_ratio"]}
+                d["crop_box"] = expand_bbox(d["bbox"], w, h, self.cfg.crop_margin)
+                out.append(d)
+            return out
         # YOLO mode
         if self._yolo is None:
             return []
         return self._yolo.detect(image)
 
-    def _detect_hazards_raw(self, image) -> List[dict]:
+    def _gdino_query(self, image, prompt: str, box_threshold: float,
+                     text_threshold: float = 0.25) -> List[dict]:
+        """One GroundingDINO open-vocab query -> list of {label, confidence, box_xywh},
+        sorted by confidence. Used by the hazard channel."""
         if self._gdino is None:
             return []
         import torch
-        inputs = self._gdino_proc(images=image, text=self.cfg.hazard_prompt,
+        inputs = self._gdino_proc(images=image, text=prompt,
                                   return_tensors="pt").to(self._gdino_device)
         with torch.no_grad():
             outputs = self._gdino(**inputs)
         res = self._gdino_proc.post_process_grounded_object_detection(
-            outputs, inputs.input_ids, threshold=self.cfg.detect_confidence_threshold,
-            text_threshold=0.25, target_sizes=[(image.height, image.width)])[0]
+            outputs, inputs.input_ids, threshold=box_threshold,
+            text_threshold=text_threshold, target_sizes=[(image.height, image.width)])[0]
         labels = res.get("text_labels", res.get("labels", []))
         out = []
         for box, score, label in zip(res["boxes"], res["scores"], labels):
@@ -176,6 +187,11 @@ class Monitor:
                         "box_xywh": (x0, y0, x1 - x0, y1 - y0)})
         out.sort(key=lambda d: d["confidence"], reverse=True)
         return out
+
+    def _detect_hazards_raw(self, image) -> List[dict]:
+        # unchanged hazard behavior: same prompt, same thresholds as before
+        return self._gdino_query(image, self.cfg.hazard_prompt,
+                                 self.cfg.detect_confidence_threshold, text_threshold=0.25)
 
     def _stub_detect(self, step: int) -> Detection:
         if step < 3:

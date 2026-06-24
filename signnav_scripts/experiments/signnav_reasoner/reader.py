@@ -13,6 +13,20 @@ sub-problem (VLMs are often confidently wrong). Here we use a practical proxy �
 agreement across a few stochastic samples: if the model says the same thing every
 time, we trust it; if reads disagree, confidence is low. This is a placeholder for
 a more principled signal (token logprobs, a legibility head, etc.) to be refined.
+
+READ SCHEMA (grouped): directory signs assign ONE arrow to a GROUP of destinations,
+and every destination in that group goes that way. We ask the model for groups
+({"dir","dests"}) rather than per-line directions, then expand each group so every
+destination inherits its group's single direction. This removes the failure where
+trailing lines under a turn arrow get defaulted to "straight". _extract_labels still
+returns the SAME flat {destination: direction} dict the rest of the pipeline expects,
+so nothing downstream changes; flat legacy shapes are still parsed for robustness.
+
+NOTE: notices/advisories (e.g. "Restroom Closed") are NOT read here. The monitor's
+notice channel only DETECTS that something notice-like is present (a cheap trigger);
+the Reasoner then examines the whole frame and interprets it (see reasoner.py
+scene_alert). We deliberately do not OCR/parse notices into a schema — the VLM reads
+and interprets the scene directly, which is more general.
 """
 
 import json
@@ -20,45 +34,120 @@ import time
 from typing import List, Optional
 
 from .interfaces import VLMInterface
-from .types import Config, Detection, ReadResult
+from .types import Config, Detection, ObjectClass, ReadResult
 
 PARSE_PROMPT = (
-    "Read this building directional sign. Directory signs group destinations under "
-    "arrows (up=straight, left, right); a destination takes the arrow of the group "
-    "above it. Transcribe every destination you can see and its arrow direction. "
-    "Read whatever text is visible, even if partially. Answer ONLY compact JSON: "
-    '{"labels": {"DEST": "left|right|straight", ...}}'
+    "Read this building directional sign. The sign is organized into GROUPS: each "
+    "group begins with ONE arrow (up=straight, left, right) followed by one or more "
+    "destination lines, and EVERY destination in that group goes in the arrow's "
+    "direction. Do NOT assign directions line-by-line — assign ONE direction per "
+    "arrow group and list all destinations under that arrow. Read whatever text is "
+    "visible, even if partial. Answer ONLY compact JSON: "
+    '{"groups": [{"dir": "left|right|straight", "dests": ["<line>", "<line>"]}, ...]}'
 )
 
 
+_DIRECTION_WORDS = {"straight", "left", "right", "up", "down", "forward", "back",
+                    "backward", "ahead", "behind", "unknown", "none", ""}
+_PLACEHOLDER_KEYS = {"dest", "destination", "destinations", "label", "labels",
+                     "dir", "direction", "key", "name", "value", "sign", "text", "line"}
+# map arrow words / glyphs to the three directions the pipeline uses
+_DIR_MAP = {"up": "straight", "\u2191": "straight", "forward": "straight", "ahead": "straight",
+            "straight": "straight", "left": "left", "\u2190": "left",
+            "right": "right", "\u2192": "right",
+            "down": "down", "\u2193": "down", "back": "back", "behind": "back"}
+
+
+def _norm_dir(d) -> str:
+    """Normalize an arrow word/glyph to left|right|straight (pass through unknowns)."""
+    s = str(d).strip().lower()
+    return _DIR_MAP.get(s, s)
+
+
+def _is_placeholder_key(k) -> bool:
+    """True for schema scaffolding the model sometimes echoes instead of real text:
+    'DEST', 'labels', 'DEST1'.., or a literal template token like '<line>'."""
+    k = str(k).strip().lower()
+    if "<" in k and ">" in k:
+        return True
+    import re
+    return k in _PLACEHOLDER_KEYS or re.fullmatch(r"dest\d+", k) is not None
+
+
+def _is_bare_direction(v) -> bool:
+    return str(v).strip().lower() in _DIRECTION_WORDS
+
+
+def _clean_labels(d: dict) -> dict:
+    """A dict whose keys are all schema placeholders mapping to bare directions
+    (e.g. {'DEST': 'straight'}) carries no sign content -> treat as empty so it
+    can't out-vote a real read."""
+    if not isinstance(d, dict) or not d:
+        return {}
+    if all(_is_placeholder_key(k) for k in d) and all(_is_bare_direction(v) for v in d.values()):
+        return {}
+    return d
+
+
+def _expand_group(g) -> list:
+    """One arrow group -> [(dest, dir), ...]. Every destination in the group inherits
+    the group's single direction — that's the whole point (no per-line defaulting).
+    Tolerant of {"dir","dests"} and the single-key {"<direction>": [dests]} shape."""
+    if not isinstance(g, dict) or not g:
+        return []
+    d = g.get("dir") or g.get("direction") or g.get("arrow")
+    dests = g.get("dests") or g.get("destinations") or g.get("labels")
+    if d is not None and dests is not None:
+        if isinstance(dests, str):
+            dests = [dests]
+        if isinstance(dests, dict):
+            dests = list(dests.keys())
+        if isinstance(dests, (list, tuple)):
+            return [(str(x).strip(), _norm_dir(d)) for x in dests if str(x).strip()]
+    if len(g) == 1:                                   # tolerate {"right": [dests]}
+        (k, v), = g.items()
+        if _norm_dir(k) in {"left", "right", "straight"}:
+            if isinstance(v, str):
+                v = [v]
+            if isinstance(v, (list, tuple)):
+                return [(str(x).strip(), _norm_dir(k)) for x in v if str(x).strip()]
+    return []
+
+
 def _extract_labels(resp: str) -> dict:
-    """Robustly pull {"labels": {...}} out of a model response that may include
-    markdown code fences, stray text, or minor formatting noise."""
     import re
     if not resp:
         return {"labels": {}}
-    # strip markdown code fences
     cleaned = re.sub(r"```(?:json)?", "", resp).strip()
-    # find the outermost {...}
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
+    start = cleaned.find("{"); end = cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
         return {"labels": {}}
     blob = cleaned[start:end + 1]
     try:
         obj = json.loads(blob)
     except Exception:
-        # try a lenient fix: single quotes -> double quotes
         try:
             obj = json.loads(blob.replace("'", '"'))
         except Exception:
             return {"labels": {}}
-    if isinstance(obj, dict):
-        if "labels" in obj and isinstance(obj["labels"], dict):
-            return {"labels": obj["labels"]}
-        # model may have returned the labels dict directly
-        if all(isinstance(v, str) for v in obj.values()):
-            return {"labels": obj}
+    if not isinstance(obj, dict):
+        return {"labels": {}}
+    # NEW grouped schema: {"groups": [{"dir","dests"}, ...]} -> expand, one dir per arrow
+    groups = obj.get("groups")
+    if isinstance(groups, list):
+        flat = {}
+        for g in groups:
+            for dest, d in _expand_group(g):
+                flat[dest] = d
+        return {"labels": _clean_labels(flat)}
+    # --- backward-compatible flat shapes (legacy / fallback if model emits flat) ---
+    # unwrap a wrapper key ("labels", "DEST", ...) that maps to a dict of entries
+    for k, v in obj.items():
+        if _is_placeholder_key(k) and isinstance(v, dict):
+            return {"labels": _clean_labels(v)}
+    # otherwise treat the object itself as the flat {destination: direction} dict
+    if all(isinstance(v, str) for v in obj.values()):
+        return {"labels": _clean_labels(obj)}
     return {"labels": {}}
 
 
@@ -70,6 +159,24 @@ def _labels_match(a: dict, b: dict) -> bool:
     na = {k.strip().lower(): str(v).strip().lower() for k, v in a.items()}
     nb = {k.strip().lower(): str(v).strip().lower() for k, v in b.items()}
     return na == nb
+
+
+def _goal_room(goal: str) -> str:
+    """'room 2-101' -> '2-101'. Falls back to the lowercased goal if no room token."""
+    import re
+    m = re.search(r"[A-Za-z]?\d+[-–]\d+", goal or "")
+    return (m.group(0) if m else (goal or "")).strip().lower()
+
+
+def _goal_in_parsed(parsed: dict, goal_room: str) -> bool:
+    """True if any destination key references the goal room. Substring match on the
+    room token (handles goal '2-101' vs key '2-101 to 2-129'). NOTE: substring, not
+    range arithmetic — if a goal can fall strictly INSIDE a printed range (goal 2-115
+    under '2-101 to 2-129'), add range-containment here. For the current data the goal
+    is the range start, so substring suffices."""
+    if not parsed or not goal_room:
+        return False
+    return any(goal_room in str(k).lower() for k in parsed.keys())
 
 
 class Reader:
@@ -135,6 +242,81 @@ class Reader:
             src_size=image.size,
         )
 
+    def read_best_for_goal(self, image, detections: List[dict], goal: str,
+                           n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
+        """MULTI-SIGN read. Reads candidates in score order and SELECTS the one whose
+        entries reference the goal. Cost-aware: stops at the first confident goal-match,
+        so single-sign frames cost what they did before. Size gate (cfg.min_read_area_ratio)
+        skips reads on tiny spurious panels. Emits a MULTI-SIGN trace when >1 candidate."""
+        self._last_read_times = []
+        if self.cfg.stub_reader:
+            d0 = detections[0] if detections else {"confidence": 0.0, "class_name": "sign"}
+            return self._stub_read(Detection(ObjectClass.SIGN, float(d0["confidence"]),
+                                             (0, 0, 240, 420), d0.get("class_name", "sign")))
+        if not detections:
+            return self._empty_read(image)
+        goal_room = _goal_room(goal)
+        gate = getattr(self.cfg, "min_read_area_ratio", 0.003)
+        all_times = []
+        records = []
+        top_rec = fallback_rec = selected_rec = None
+        for rank, det_dict in enumerate(detections):
+            area_ratio = float(det_dict.get("box_area_ratio", 1.0))
+            score = float(det_dict.get("score", det_dict.get("confidence", 0.0)))
+            rec = {"rank": rank, "score": score, "area": area_ratio, "skipped": False,
+                   "parsed": {}, "conf": 0.0, "can_decide": False, "goal": False,
+                   "selected": False, "_res": None}
+            records.append(rec)
+            if area_ratio < gate:
+                rec["skipped"] = True
+                continue
+            cx1, cy1, cx2, cy2 = det_dict["crop_box"]
+            det = Detection(ObjectClass.SIGN, float(det_dict["confidence"]),
+                            (cx1, cy1, cx2 - cx1, cy2 - cy1), det_dict.get("class_name", "sign"))
+            res = self.read(image, det, n_samples=n_samples, frame_idx=frame_idx)
+            all_times.extend(self._last_read_times)
+            rec["parsed"] = res.structured
+            rec["conf"] = res.read_confidence
+            rec["can_decide"] = res.can_decide
+            rec["goal"] = bool(res.can_decide and _goal_in_parsed(res.structured, goal_room))
+            rec["_res"] = res
+            if top_rec is None:
+                top_rec = rec
+            if res.can_decide:
+                if rec["goal"]:
+                    selected_rec = rec
+                    break
+                if fallback_rec is None:
+                    fallback_rec = rec
+        if selected_rec is None:
+            selected_rec = fallback_rec or top_rec
+        if selected_rec is not None:
+            selected_rec["selected"] = True
+        self._last_read_times = all_times
+        self._log_multi_sign(records, len(detections))
+        if selected_rec is not None:
+            return selected_rec["_res"]
+        return self._empty_read(image)
+
+    def _log_multi_sign(self, records, n_detected):
+        if len(records) < 2:
+            return
+        n_read = sum(1 for r in records if not r["skipped"])
+        print(f"  MULTI-SIGN: {n_detected} candidate panel(s), {n_read} read")
+        for r in records:
+            mark = "  <- SELECTED" if r["selected"] else ""
+            if r["skipped"]:
+                print(f"    cand {r['rank']}  score={r['score']:.3f}  "
+                      f"area={r['area'] * 100:.1f}%  SKIPPED (below size gate){mark}")
+            else:
+                goal = "YES" if r["goal"] else "NO"
+                print(f"    cand {r['rank']}  score={r['score']:.3f}  "
+                      f"area={r['area'] * 100:.1f}%  conf={r['conf']:.3f}  "
+                      f"goal={goal}  read={r['parsed']}{mark}")
+        not_read = n_detected - len(records)
+        if not_read > 0:
+            print(f"    (+{not_read} more not read - goal already found, reads saved)")
+
     def _one_read(self, crop, sample: bool) -> dict:
         _t0 = time.perf_counter()
         resp = self.vlm.generate(PARSE_PROMPT, crop, sample=sample, max_new_tokens=200)
@@ -153,3 +335,14 @@ class Reader:
         return ReadResult(
             text=json.dumps(parsed), read_confidence=round(conf, 2),
             structured=parsed, can_decide=conf >= self.cfg.read_confidence_threshold)
+
+    def _empty_read(self, image) -> ReadResult:
+        """No readable candidate (e.g. all below the size gate). Low confidence so the
+        loop keeps approaching until a panel is large enough to read."""
+        try:
+            src = image.size
+        except Exception:
+            src = (0, 0)
+        return ReadResult(text="{}", read_confidence=0.0, structured={},
+                          can_decide=False, crop_box=(0, 0, 0, 0), crop_size=(0, 0),
+                          crop_path="", src_size=src)

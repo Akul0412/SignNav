@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=signnav_loop_test
 #SBATCH --partition=msigpu                 
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --account=gini
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
@@ -24,11 +24,11 @@ echo "=== start: $(date '+%H:%M:%S') ==="
 # Test the full loop on a real extracted trip, every 5th frame.
 # Sign detection: OpenCV dark-panel HEURISTIC (use_yolo=False) — no torchvision needed,
 #   and YOLO can't see indoor signs anyway. Hazards: GroundingDINO. Read+reason: Qwen-7B fp16.
+
 cd signnav_scripts/experiments
+
 python -m signnav_reasoner.loop \
-    --frames ../datasets/extracted/rosbag2_keller_c9/frames \
-    --goal "6-146" \
-    --every 5 \
-    2>&1
+    --journey ../datasets/extracted/rosbag2_keller_c11_long_horizon \
+    --goal "Elevators"
 
 echo "=== end: $(date '+%H:%M:%S') ==="
