@@ -16,7 +16,8 @@ a more principled signal (token logprobs, a legibility head, etc.) to be refined
 """
 
 import json
-from typing import Optional
+import time
+from typing import List, Optional
 
 from .interfaces import VLMInterface
 from .types import Config, Detection, ReadResult
@@ -75,10 +76,12 @@ class Reader:
     def __init__(self, config: Config, vlm: Optional[VLMInterface] = None):
         self.cfg = config
         self.vlm = vlm   # shared VLMInterface; None only when stub_reader=True
+        self._last_read_times: List[float] = []   # per-call durations from last read()
 
     def read(self, image, detection: Detection, n_samples: int = 3, frame_idx: int = 0) -> ReadResult:
         """Crop the sign from full-res and read it, returning text + confidence.
         Also saves the crop to disk (if cfg.save_crops) and records crop diagnostics."""
+        self._last_read_times = []   # reset per-call timing for this invocation
         if self.cfg.stub_reader:
             return self._stub_read(detection)
 
@@ -133,7 +136,9 @@ class Reader:
         )
 
     def _one_read(self, crop, sample: bool) -> dict:
+        _t0 = time.perf_counter()
         resp = self.vlm.generate(PARSE_PROMPT, crop, sample=sample, max_new_tokens=200)
+        self._last_read_times.append(time.perf_counter() - _t0)
         print(f"    [raw Qwen read] {resp!r}")
         return _extract_labels(resp)
 

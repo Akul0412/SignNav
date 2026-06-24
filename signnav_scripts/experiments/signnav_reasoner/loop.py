@@ -54,6 +54,23 @@ class AdaptiveReasoningLoop:
         self.dbg = DebugLogger(level=config.debug_level)
         print(f"=== ready. goal: '{config.goal}' ===\n")
 
+    def _log_timing(self, t_frame_start: float, t_detect: float,
+                    t_read: float = 0.0, t_reason: float = 0.0) -> None:
+        if not self.cfg.log_timing:
+            return
+        t_total = time.perf_counter() - t_frame_start
+        sign_t   = getattr(self.monitor, "_last_sign_t",   0.0)
+        hazard_t = getattr(self.monitor, "_last_hazard_t", 0.0)
+        parts = [f"detect {t_detect:.2f}s (sign {sign_t:.2f}s gdino {hazard_t:.2f}s)"]
+        if t_read > 0:
+            calls = getattr(self.reader, "_last_read_times", [])
+            per_call = "+".join(f"{t:.2f}s" for t in calls)
+            parts.append(f"read×{len(calls)} {t_read:.2f}s ({per_call})")
+        if t_reason > 0:
+            parts.append(f"reason {t_reason:.2f}s")
+        parts.append(f"frame {t_total:.2f}s")
+        print("[timing] " + " | ".join(parts))
+
     def step(self, image, idx: int, total: int = 0, ts: str = "",
              memory_override: Optional[str] = None) -> Optional[Decision]:
         """Process one frame through the full loop.
@@ -63,10 +80,13 @@ class AdaptiveReasoningLoop:
         context for VLM calls instead of the internal _memory string.  The caller
         is then responsible for memory bookkeeping.
         """
+        t_frame = time.perf_counter()
         dbg = self.dbg
         dbg.frame_header(idx, total, ts)
 
+        _t0 = time.perf_counter()
         bundle = self.monitor.detect_all(image, step=idx)
+        t_detect = time.perf_counter() - _t0
         det = bundle.chosen
         dbg.detectors(bundle.sign_dets, bundle.hazard_dets)
         dbg.chosen(det)
@@ -74,7 +94,7 @@ class AdaptiveReasoningLoop:
         # pick which memory string the VLM sees
         mem = memory_override if memory_override is not None else self._memory
 
-        # --- nothing relevant: keep going ---
+        # --- nothing relevant: keep going (no timing print — nothing expensive ran) ---
         if det.cls == ObjectClass.NONE:
             self.controller.continue_previous()
             dbg.action(self.controller.current_action.value, "continuing previous")
@@ -83,17 +103,22 @@ class AdaptiveReasoningLoop:
 
         # --- hazard: VLM reasons about what it means ---
         if det.cls in (ObjectClass.STAIRS, ObjectClass.OBSTACLE):
+            _t0 = time.perf_counter()
             decision = self.reasoner.reason_hazard(image, det, mem)
+            t_reason = time.perf_counter() - _t0
             dbg.reasoning(decision.rationale)
             self.controller.execute(decision)
             dbg.action(decision.action.value)
             if memory_override is None:
                 self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
             self._approach_steps = 0
+            self._log_timing(t_frame, t_detect, t_reason=t_reason)
             return decision
 
         # --- sign: read with confidence gate ---
+        _t0 = time.perf_counter()
         read = self.reader.read(image, det, frame_idx=idx)
+        t_read = time.perf_counter() - _t0
         dbg.crop(read.crop_box, read.crop_size, read.crop_path, read.src_size)
         dbg.read(read)
 
@@ -106,16 +131,20 @@ class AdaptiveReasoningLoop:
                 print("  ACTION: approach cap reached; continuing forward")
                 self.controller.continue_previous()
             dbg.action(self.controller.current_action.value)
+            self._log_timing(t_frame, t_detect, t_read=t_read)
             return None
 
         # high confidence -> commit to chain-of-thought reasoning
         self._approach_steps = 0
+        _t0 = time.perf_counter()
         decision = self.reasoner.reason_sign(image, read, self.cfg.goal, mem)
+        t_reason = time.perf_counter() - _t0
         dbg.reasoning(decision.rationale)
         self.controller.execute(decision)
         dbg.action(decision.action.value)
         if memory_override is None:
             self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
+        self._log_timing(t_frame, t_detect, t_read=t_read, t_reason=t_reason)
         return decision
 
     def run_on_folder(self, folder: str):

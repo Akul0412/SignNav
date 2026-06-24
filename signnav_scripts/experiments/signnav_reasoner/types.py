@@ -147,6 +147,8 @@ class Config:
     every_n_frames: int = 1           # process every Nth frame from the source
     max_approach_steps: int = 8       # safety cap on "keep approaching to read"
 
+    log_timing: bool = True           # print per-frame and per-leg wall-clock timing
+
     # odom-based completion detection — motion-settled (all tunable against a recording)
     # a leg is done when the robot was moving and then its displacement goes quiet
     odom_sample_ms: float = 75.0          # cadence at which is_done() samples odom (ms)

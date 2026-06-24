@@ -15,6 +15,7 @@ or the caller stops it.  The researcher checks arrival manually.
 """
 
 import math
+import time
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
@@ -191,6 +192,11 @@ class JourneyLoop:
         self._phase = JourneyPhase.REASONING
         self._detector: Optional[CompletionDetector] = None
         self._pending_rec: Optional[DecisionRecord] = None   # record for the leg in flight
+        # journey-level wall-clock timing
+        self._journey_start_wall: Optional[float] = None
+        self._phase_start_wall: Optional[float] = None   # when current phase began
+        self._leg_reasoning_wall_s: float = 0.0          # reasoning wall-time for leg in flight
+        self._total_odom_s: float = 0.0                  # cumulative odom-time across all legs
 
     # ── per-frame tick ────────────────────────────────────────────────────────
 
@@ -243,11 +249,16 @@ class JourneyLoop:
         print(f"[Journey] → ACTING → WAITING")
         print(f"[Journey] ══════════════════════════════════════════════\n")
 
+        # capture reasoning wall-time for this leg before transitioning
+        if self._phase_start_wall is not None:
+            self._leg_reasoning_wall_s = time.perf_counter() - self._phase_start_wall
+
         # hand off to detector (ACTING is instant in offline mode — no real VLA)
         self._phase = JourneyPhase.ACTING
         if self._detector is not None:
             self._detector.start(decision, frame_t_ns)
         self._phase = JourneyPhase.WAITING
+        self._phase_start_wall = time.perf_counter()   # WAITING phase begins now
 
     def _tick_waiting(self, frame_t_ns: int, idx: int) -> None:
         if self._detector is None:
@@ -262,23 +273,42 @@ class JourneyLoop:
             if self._pending_rec is not None:
                 self._pending_rec.turn_magnitude_deg = mag
 
-            elapsed_s = ((frame_t_ns - self._detector._t_start_ns) / 1e9
-                         if hasattr(self._detector, "_t_start_ns") else 0.0)
+            odom_elapsed_s = ((frame_t_ns - self._detector._t_start_ns) / 1e9
+                              if hasattr(self._detector, "_t_start_ns") else 0.0)
             via_timeout = getattr(self._detector, "_done_via_timeout", False)
             total_disp  = getattr(self._detector, "_total_disp_m", 0.0)
             completion  = "TIMEOUT (motion never settled)" if via_timeout else "SETTLED (motion went quiet)"
 
+            # wall-clock timing for this leg
+            waiting_wall_s  = (time.perf_counter() - self._phase_start_wall
+                               if self._phase_start_wall is not None else 0.0)
+            journey_wall_s  = (time.perf_counter() - self._journey_start_wall
+                               if self._journey_start_wall is not None else 0.0)
+            self._total_odom_s += odom_elapsed_s
+
             leg_num = self._pending_rec.leg if self._pending_rec else "?"
             print(f"\n[Journey] ══════════════════════════════════════════════")
             print(f"[Journey] LEG {leg_num} COMPLETE  ({completion})")
-            print(f"[Journey]   turn magnitude : {mag:.1f}°")
-            print(f"[Journey]   total disp     : {total_disp:.2f} m")
-            print(f"[Journey]   elapsed        : {elapsed_s:.1f} s")
+            print(f"[Journey]   turn magnitude     : {mag:.1f}°")
+            print(f"[Journey]   total disp         : {total_disp:.2f} m")
+            print(f"[Journey]   odom elapsed       : {odom_elapsed_s:.1f} s  "
+                  f"(robot motion duration — recorded)")
+            if self.cfg.log_timing:
+                print(f"[Journey]   reasoning wall     : {self._leg_reasoning_wall_s:.1f} s  "
+                      f"(wall-clock: VLM calls for this leg)")
+                print(f"[Journey]   waiting wall       : {waiting_wall_s:.1f} s  "
+                      f"(wall-clock: consuming WAITING frames)")
+                print(f"[Journey]   journey wall total : {journey_wall_s:.1f} s  "
+                      f"(wall-clock since run started)")
+                print(f"[Journey]   journey odom total : {self._total_odom_s:.1f} s  "
+                      f"(odom-time across all completed legs)")
             print(f"[Journey] → REASONING (leg {self._state.current_leg})")
             print(f"[Journey] ══════════════════════════════════════════════\n")
 
             self._pending_rec = None
             self._phase = JourneyPhase.REASONING
+            self._phase_start_wall = time.perf_counter()   # REASONING phase begins now
+            self._leg_reasoning_wall_s = 0.0
 
     # ── batch entry point ─────────────────────────────────────────────────────
 
@@ -341,6 +371,9 @@ class JourneyLoop:
         frame_t_ns = frame_t_ns[:n]
 
         print(f"[Journey] {n} frames  |  goal: '{self.cfg.goal}'\n")
+
+        self._journey_start_wall = time.perf_counter()
+        self._phase_start_wall   = time.perf_counter()   # first REASONING phase begins now
 
         errors = []
         for idx, (p, t_ns) in enumerate(zip(frames, frame_t_ns)):

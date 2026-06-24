@@ -17,6 +17,7 @@ KNOWN ISSUES surfaced by testing (see analysis):
 """
 
 import sys
+import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional
@@ -43,6 +44,8 @@ class Monitor:
         self._gdino = None
         self._cv2 = None              # for heuristic-only sign detection
         self._heuristic_only = not config.use_yolo
+        self._last_sign_t: float = 0.0    # wall-clock duration of last sign detection
+        self._last_hazard_t: float = 0.0  # wall-clock duration of last hazard detection
         if not config.stub_detector:
             self._load_sign_detector()
             self._load_hazard_detector()
@@ -98,8 +101,13 @@ class Monitor:
             d = self._stub_detect(step)
             return DetectionBundle(chosen=d, sign_dets=[], hazard_dets=[])
 
+        _t0 = time.perf_counter()
         sign_dets = self._detect_signs_raw(image)
+        self._last_sign_t = time.perf_counter() - _t0
+
+        _t0 = time.perf_counter()
         hazard_dets = self._detect_hazards_raw(image)
+        self._last_hazard_t = time.perf_counter() - _t0
 
         # choose: hazard outranks sign (safety) — but ONLY above the higher hazard bar.
         # Below that bar, a "hazard" is treated as a false positive and ignored
