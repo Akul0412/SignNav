@@ -168,3 +168,7 @@ class Config:
     leg_timeout_sec: float = 30.0         # s  — generous fallback if motion never settles
 
     reread_cooldown_frames: int = 4
+
+    # VLA seam: when set, committed decisions' OmniVLA prompts are appended here as
+    # JSONL (separate from the .log). None => sidecar simply not written (safe no-op).
+    decisions_jsonl_path: Optional[str] = None

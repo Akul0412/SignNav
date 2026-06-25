@@ -29,6 +29,7 @@ reasoning); the VLM does all the interpreting.
 """
 
 import json
+import re
 from typing import Optional
 
 from .interfaces import VLMInterface
@@ -68,11 +69,16 @@ def build_reasoning_prompt(goal: str, sign_facts: dict, memory_summary: str,
         "each sign actually means for a delivery robot — do not assume, reason about it).\n"
         "  - Whether your goal's direction conflicts with any restriction or physical limit.\n"
         "  - If something conflicts, what the right alternative is.\n\n"
-        "Write your reasoning as numbered steps, then end with a single line:\n"
+        "Write your reasoning as numbered steps, then end with TWO lines:\n"
         "DECISION: <one of: go_straight | turn_left | turn_right | stop | reroute | "
-        "approach_to_read | continue>\n\n"
+        "approach_to_read | continue>\n"
+        "TARGET: <in 6 words or fewer, the single visible thing or corridor to head "
+        "toward to carry out the decision — e.g. 'the left hallway', 'the glass doors "
+        "ahead', 'the elevators'. If you are approaching a sign to read it, name the "
+        "sign (e.g. 'the directory sign ahead'). If nothing salient is visible, write "
+        "'the hallway ahead'. For stop, write 'none'.>\n\n"
         "Format:\n"
-        "REASONING:\n1. ...\n2. ...\n3. ...\nDECISION: <action>"
+        "REASONING:\n1. ...\n2. ...\n3. ...\nDECISION: <action>\nTARGET: <short phrase>"
     )
 
 
@@ -192,11 +198,23 @@ class Reasoner:
         return False   # no parseable line found → not arrived
 
     def _parse(self, text: str, triggered_by: ObjectClass) -> Decision:
-        """Pull the DECISION line out; keep the full chain-of-thought as the rationale."""
+        """Pull the DECISION line out; keep the full chain-of-thought as the rationale.
+        Also scan for an optional TARGET line -> nav_target (sign branch). Conservative:
+        missing/unusable TARGET leaves nav_target='' and never blocks the decision.
+        Hazard responses have no TARGET line, so nav_target stays '' there (correct)."""
         action = ActionType.CONTINUE
         for line in text.splitlines():
             if line.strip().upper().startswith("DECISION"):
                 word = line.split(":", 1)[-1].strip().lower().replace(" ", "_")
                 action = _DECISION_WORDS.get(word, ActionType.CONTINUE)
                 break
-        return Decision(action=action, rationale=text.strip(), triggered_by=triggered_by)
+        nav_target = ""
+        for line in text.splitlines():
+            if line.strip().upper().startswith("TARGET"):
+                raw = line.split(":", 1)[-1].strip()
+                if raw and raw.lower() not in ("none", "n/a", "-", ""):
+                    raw = re.sub(r'^\s*move toward\s+', '', raw, flags=re.I).strip().strip('."\'')
+                    nav_target = " ".join(raw.split()[:6])   # clamp to 6 words
+                break
+        return Decision(action=action, rationale=text.strip(),
+                        triggered_by=triggered_by, nav_target=nav_target)

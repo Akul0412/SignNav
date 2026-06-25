@@ -31,6 +31,7 @@ from .monitor import Monitor
 from .reader import Reader
 from .reasoner import Reasoner
 from .controller import Controller
+from .vla_interface import VLAInterface
 
 
 def _indent(text: str, pad: str = "            ") -> str:
@@ -48,12 +49,21 @@ class AdaptiveReasoningLoop:
         self.reader = Reader(config, vlm=vlm)
         self.reasoner = Reasoner(config, vlm=vlm)
         self.controller = Controller()
+        self.vla = VLAInterface(config, getattr(config, "decisions_jsonl_path", None))
         self._approach_steps = 0
         self._read_cooldown = 0            # frames left to coast before re-reading a sign
         self._memory = ""                  # running summary of decisions (chain-of-thought memory)
         from .debug import DebugLogger
         self.dbg = DebugLogger(level=config.debug_level)
         print(f"=== ready. goal: '{config.goal}' ===\n")
+
+    def _emit_vla(self, decision, idx):
+        """Generate + record the OmniVLA prompt for a committed decision. Guarded so
+        sidecar/seam issues can never crash the loop."""
+        try:
+            self.vla.process(decision, idx, self.cfg.goal)
+        except Exception as e:
+            print(f"[vla] skipped: {e}")
 
     def _log_timing(self, t_frame_start: float, t_detect: float,
                     t_read: float = 0.0, t_reason: float = 0.0) -> None:
@@ -114,6 +124,7 @@ class AdaptiveReasoningLoop:
                 self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
             self._approach_steps = 0
             self._log_timing(t_frame, t_detect, t_reason=t_reason)
+            self._emit_vla(decision, idx)
             return decision
 
         # --- sign: read with confidence gate ---
@@ -160,6 +171,7 @@ class AdaptiveReasoningLoop:
         if memory_override is None:
             self._memory = (self._memory + f" | {decision.action.value}").strip(" |")
         self._log_timing(t_frame, t_detect, t_read=t_read, t_reason=t_reason)
+        self._emit_vla(decision, idx)
         return decision
 
     def run_on_folder(self, folder: str):
@@ -212,9 +224,13 @@ def main():
     ap.add_argument("--stub-detector", action="store_true")
     ap.add_argument("--stub-reader",   action="store_true")
     ap.add_argument("--stub-reasoner", action="store_true")
+    ap.add_argument("--decisions-jsonl", default=None,
+                    help="Path to append committed-decision OmniVLA prompts as JSONL "
+                         "(separate from the .log). Unset => sidecar not written.")
     args = ap.parse_args()
 
-    cfg = Config(goal=args.goal, every_n_frames=args.every)
+    cfg = Config(goal=args.goal, every_n_frames=args.every,
+                 decisions_jsonl_path=args.decisions_jsonl)
     if args.stub_all:
         cfg.stub_detector = cfg.stub_reader = cfg.stub_reasoner = True
     cfg.stub_detector = cfg.stub_detector or args.stub_detector
