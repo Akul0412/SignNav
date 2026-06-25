@@ -56,11 +56,19 @@ class ActionType(str, Enum):
 
 @dataclass
 class Decision:
-    """The output of a reasoning step: an action plus the rationale (the trace)."""
+    """The output of a reasoning step: an action plus the rationale (the trace).
+
+    The last two fields feed the OmniVLA language channel (SignNav→OmniVLA spec v1):
+    populated by the reasoner (Step D) and consumed by vla_bridge. They default to
+    empty so existing construction and the inner loop are unaffected.
+    """
     action: ActionType
     rationale: str                    # human-readable reasoning trace
     triggered_by: ObjectClass = ObjectClass.NONE
     read: Optional[ReadResult] = None
+    # --- OmniVLA language channel (spec v1) ---
+    nav_target: str = ""              # short visible-anchor phrase for "move toward {target}"
+    goal: str = ""                    # journey goal carried alongside (formatter input)
 
 
 @dataclass
